@@ -1,0 +1,22 @@
+services:
+  clipperboy:
+    build: .
+    image: clipperboy:latest
+    container_name: clipperboy
+    ports:
+      - "8000:8000"
+    volumes:
+      # Clips, uploads and the downloaded Whisper model live on your machine,
+      # so they survive rebuilds and you can grab files straight from ./data.
+      - ./data:/app/data
+    environment:
+      # tiny | base | small | medium — bigger is more accurate but slower.
+      CLIPPERBOY_WHISPER_MODEL: ${CLIPPERBOY_WHISPER_MODEL:-base}
+      CLIPPERBOY_CLIP_COUNT: ${CLIPPERBOY_CLIP_COUNT:-8}
+      CLIPPERBOY_ASPECT: ${CLIPPERBOY_ASPECT:-9:16}
+      # Set to "off" to skip the optional local-LLM title polish entirely.
+      CLIPPERBOY_USE_OLLAMA: ${CLIPPERBOY_USE_OLLAMA:-auto}
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped

@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Clipperboy — turn a podcast into social clips</title>
+  <meta name="description" content="Upload a full-length podcast and get vertical, captioned, speaker-tracked clips ready for Reels, TikTok and Shorts.">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>✂️</text></svg>">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to main content</a>
+
+  <header class="site-header">
+    <div class="wrap header-inner">
+      <h1 class="logo"><span aria-hidden="true">✂️</span> Clipperboy</h1>
+      <p class="tagline">Upload a podcast. Get social-ready clips.</p>
+    </div>
+  </header>
+
+  <main id="main" class="wrap">
+
+    <!-- STEP 1 — UPLOAD -->
+    <section id="upload-section" aria-labelledby="upload-heading" class="panel">
+      <h2 id="upload-heading" class="step"><span class="step-num" aria-hidden="true">1</span> Choose your episode</h2>
+
+      <form id="upload-form">
+        <div id="dropzone" class="dropzone" tabindex="0" role="button"
+             aria-describedby="dropzone-hint"
+             aria-label="Choose a podcast file, or drag and drop one here">
+          <span class="dropzone-icon" aria-hidden="true">🎙️</span>
+          <span class="dropzone-title">Drag &amp; drop your podcast</span>
+          <span class="dropzone-sub">or <u>browse your files</u></span>
+          <p id="dropzone-hint" class="hint">Video or audio — MP4, MOV, MKV, WEBM, MP3, M4A, WAV. No size limit; it never leaves your computer.</p>
+          <input id="file-input" class="visually-hidden" type="file"
+                 accept="video/*,audio/*,.mp4,.mov,.mkv,.webm,.avi,.m4v,.mp3,.m4a,.wav,.aac,.flac,.ogg,.opus">
+        </div>
+
+        <p id="file-chosen" class="file-chosen" role="status" hidden></p>
+
+        <fieldset class="options">
+          <legend>Clip settings</legend>
+
+          <div class="option">
+            <label for="aspect">Aspect ratio</label>
+            <select id="aspect" name="aspect">
+              <option value="9:16" selected>9:16 — Reels, TikTok, Shorts</option>
+              <option value="1:1">1:1 — Square feed post</option>
+              <option value="16:9">16:9 — YouTube, landscape</option>
+            </select>
+            <p class="option-hint">You can re-export any clip in another ratio afterwards.</p>
+          </div>
+
+          <div class="option">
+            <label for="clip-count">How many clips</label>
+            <input id="clip-count" name="clip_count" type="number" min="1" max="20" value="8" inputmode="numeric">
+            <p class="option-hint">The highest-scoring, non-overlapping moments.</p>
+          </div>
+
+          <div class="option">
+            <label for="compress">Compress source</label>
+            <select id="compress" name="compress">
+              <option value="auto" selected>Automatic — only if the file is large</option>
+              <option value="always">Always — fastest processing</option>
+              <option value="never">Never — keep full quality</option>
+            </select>
+            <p class="option-hint">Shrinks huge uploads to 1080p before analysis.</p>
+          </div>
+        </fieldset>
+
+        <button id="start-btn" class="btn btn-primary btn-lg" type="submit" disabled>
+          Find my clips
+        </button>
+        <p id="upload-error" class="error-msg" role="alert" hidden></p>
+      </form>
+    </section>
+
+    <!-- STEP 2 — PROGRESS -->
+    <section id="progress-section" aria-labelledby="progress-heading" class="panel" hidden>
+      <h2 id="progress-heading" class="step"><span class="step-num" aria-hidden="true">2</span> Working on it</h2>
+
+      <p id="progress-file" class="progress-file"></p>
+
+      <div class="progress-track">
+        <div class="progress-bar-outer">
+          <div id="progress-bar" class="progress-bar-inner" role="progressbar"
+               aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"
+               aria-labelledby="progress-heading"></div>
+        </div>
+        <span id="progress-pct" class="progress-pct">0%</span>
+      </div>
+
+      <p id="progress-message" class="progress-message" role="status" aria-live="polite">Starting…</p>
+
+      <ol id="stage-list" class="stage-list"></ol>
+
+      <p class="hint">Roughly real-time on a laptop: a 60-minute episode takes about 10–20 minutes.
+        Leave this tab open — you can keep using your computer.</p>
+
+      <button id="cancel-btn" class="btn btn-quiet" type="button">Cancel and start over</button>
+      <p id="job-error" class="error-msg" role="alert" hidden></p>
+    </section>
+
+    <!-- STEP 3 — RESULTS -->
+    <section id="results-section" aria-labelledby="results-heading" class="panel" hidden>
+      <div class="results-head">
+        <div>
+          <h2 id="results-heading" class="step"><span class="step-num" aria-hidden="true">3</span> Your clips</h2>
+          <p id="results-summary" class="results-summary"></p>
+        </div>
+        <div class="results-actions">
+          <a id="download-all" class="btn btn-primary" href="#" download>Download all clips (.zip)</a>
+          <a id="download-transcript" class="btn btn-secondary" href="#" download>Full transcript</a>
+          <button id="new-upload" class="btn btn-secondary" type="button">New episode</button>
+        </div>
+      </div>
+
+      <ul id="clip-grid" class="clip-grid"></ul>
+    </section>
+
+    <!-- HISTORY -->
+    <section id="history-section" aria-labelledby="history-heading" class="panel panel-quiet" hidden>
+      <h2 id="history-heading">Earlier episodes</h2>
+      <ul id="history-list" class="history-list"></ul>
+    </section>
+
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <p>Clipperboy runs entirely on your machine — Whisper for transcription, FFmpeg for editing.
+         No accounts, no API keys, no uploads to anyone else.</p>
+    </div>
+  </footer>
+
+  <!-- Clip preview dialog -->
+  <dialog id="preview-dialog" class="preview-dialog" aria-labelledby="preview-title">
+    <div class="preview-head">
+      <h3 id="preview-title">Clip preview</h3>
+      <button id="preview-close" class="btn btn-quiet" type="button" aria-label="Close preview">Close</button>
+    </div>
+    <video id="preview-video" controls playsinline preload="metadata"></video>
+    <p id="preview-caption" class="preview-caption"></p>
+  </dialog>
+
+  <script src="app.js"></script>
+</body>
+</html>
