@@ -4,7 +4,7 @@
   --bg: #0e1116;
   --surface: #171b22;
   --surface-2: #1f242d;
-  --border: #55616f;          /* ≥3:1 against both surfaces (WCAG 1.4.11) */
+  --border: #737f8d;          /* ≥3.8:1 against every surface (WCAG 1.4.11) */
   --border-soft: #2f3742;     /* decorative only — never the sole affordance */
   --text: #f2f5f9;
   --text-dim: #b6c0cd;

@@ -124,6 +124,14 @@
 
   el.fileInput.addEventListener("change", () => chooseFile(el.fileInput.files[0]));
 
+  // The <label> is the keyboard-reachable control, so it needs key handling.
+  document.querySelector(".dropzone-browse").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      el.fileInput.click();
+    }
+  });
+
   ["dragenter", "dragover"].forEach((evt) =>
     el.dropzone.addEventListener(evt, (e) => {
       e.preventDefault();
@@ -147,7 +155,7 @@
     e.preventDefault();
     if (!selectedFile) {
       showError(el.uploadError, "Choose a podcast file first — drag one in, or use “Browse your files”.");
-      el.fileInput.focus();
+      document.querySelector(".dropzone-browse").focus();
       return;
     }
 
@@ -204,7 +212,7 @@
     el.progressSection.hidden = true;
     el.resultsSection.hidden = true;
     loadHistory();
-    el.fileInput.focus();
+    document.querySelector(".dropzone-browse").focus();
   }
 
   // ---------- polling ----------
@@ -263,7 +271,18 @@
   // ---------- results ----------
   function renderResults(job) {
     if (!job.clips.length) {
-      el.resultsSection.hidden = true;      // nothing to show yet
+      // Nothing to show yet — but a *finished* job with no clips must not leave
+      // the user staring at a blank page.
+      el.resultsSection.hidden = job.status !== "done";
+      if (job.status === "done") {
+        el.resultsSummary.textContent =
+          "No clips were produced from this episode. It may be too short, or " +
+          "contain no clear speech. Try another file.";
+        el.clipGrid.innerHTML = "";
+        el.downloadAll.setAttribute("aria-disabled", "true");
+        el.downloadAll.href = "#";
+        el.downloadTranscript.hidden = !job.transcript_available;
+      }
       return;
     }
     el.resultsSection.hidden = false;

@@ -44,11 +44,11 @@ class CropPlan:
         terms = []
         for i, (t, x) in enumerate(self.keyframes):
             if i == 0:
-                gate = f"lt(t,{self.keyframes[1][0]:.2f})"
+                gate = f"lt(t,{self.keyframes[1][0]:.3f})"
             elif i == len(self.keyframes) - 1:
-                gate = f"gte(t,{t:.2f})"
+                gate = f"gte(t,{t:.3f})"
             else:
-                gate = f"gte(t,{t:.2f})*lt(t,{self.keyframes[i + 1][0]:.2f})"
+                gate = f"gte(t,{t:.3f})*lt(t,{self.keyframes[i + 1][0]:.3f})"
             terms.append(f"{x}*{gate}")
         return "+".join(terms)
 

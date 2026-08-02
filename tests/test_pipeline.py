@@ -1,6 +1,7 @@
 """Unit + integration tests for the clip pipeline (no model download needed)."""
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -270,7 +271,7 @@ def test_crop_expression_holds_the_first_keyframe(video_fixture):
     plan = speaker.CropPlan(400, 720, [(0.0, 111), (5.0, 222)], 2, "speaker-tracked")
     expr = plan.expression()
     assert "111" in expr and "222" in expr
-    assert expr.startswith("111*lt(t,5.00)")
+    assert expr.startswith("111*lt(t,5.000)")
 
 
 def test_plan_crop_caps_keyframe_count(video_fixture):
@@ -343,3 +344,72 @@ def test_audio_card_draws_the_clip_title(audio_fixture, tmp_path, fake_transcrip
         return img[int(img.shape[0] * 0.10):int(img.shape[0] * 0.22), :, :].astype(float)
 
     assert float(np.mean(np.abs(top_band("Focus beats hours", "titled") - top_band("", "plain")))) > 1.0
+
+
+def test_over_long_words_are_hyphenated_for_burned_captions(tmp_path):
+    """libass only wraps at spaces, so a 46-character compound used to be
+    sliced off both frame edges."""
+    long_word = "Verkehrsinfrastrukturfinanzierungsgesellschaft"
+    words = _words([(0.0, 1.2, long_word), (1.2, 1.6, "ist"), (1.6, 2.0, "lang.")])
+
+    lines = captions.group_words(words)
+    pieces = [w.text for line in lines for w in line]
+    assert long_word not in pieces
+    assert any(p.endswith("-") for p in pieces)
+    assert max(len(p) for p in pieces) <= captions.HARD_BREAK_CHARS
+    # The word is preserved, just broken.
+    assert "".join(p.rstrip("-") for p in pieces if p not in ("ist", "lang.")) == long_word
+
+    # The .srt sidecar has no width limit, so it keeps the real word.
+    srt = captions.build_srt(words, 0.0, 3.0, tmp_path / "w.srt").read_text()
+    assert long_word in srt
+
+
+def test_wide_lines_are_scaled_down_to_fit_the_margins(tmp_path, monkeypatch):
+    """Belt-and-braces: a line that would still overrun the safe margins is
+    scaled down rather than sliced. With normal settings the line-length cap
+    keeps this from ever firing, so the cap is raised to exercise it."""
+    line = _words([(0.0, 0.4, "abcdefghijklmnopqrst"), (0.4, 0.8, "uvwxyzabcdefghij")])
+
+    normal = captions.build_ass(line, 0.0, 1.0, 1080, 1920, tmp_path / "n.ass").read_text()
+    assert {int(m) for m in re.findall(r"\\fscx(\d+)", normal)} == {100, 108}
+
+    monkeypatch.setattr(captions, "MAX_LINE_CHARS", 80)
+    monkeypatch.setattr(captions, "WORDS_PER_LINE", 8)
+    wide = captions.build_ass(line, 0.0, 1.0, 1080, 1920, tmp_path / "w.ass").read_text()
+    scales = {int(m) for m in re.findall(r"\\fscx(\d+)", wide)}
+    assert min(scales) < 100
+    assert min(scales) >= captions.MIN_LINE_SCALE
+
+
+def test_long_words_stay_inside_the_frame(tmp_path):
+    """End-to-end proof: burn a brutal line and check no pixel touches an edge."""
+    import cv2
+    import numpy as np
+
+    words = _words([(0.0, 1.0, "Die"), (1.0, 2.4, "Verkehrsinfrastrukturfinanzierungsgesellschaft"),
+                    (2.4, 3.0, "ist"), (3.0, 3.6, "kompliziert.")])
+    ass = captions.build_ass(words, 0.0, 4.0, 1080, 1920, tmp_path / "edge.ass")
+    out = tmp_path / "edge.mp4"
+    subprocess.run([
+        "ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=0x203040:s=1080x1920:d=4:r=8",
+        "-vf", f"subtitles='{ass}':fontsdir='{Path('assets/fonts').resolve()}'",
+        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(out),
+    ], check=True, capture_output=True)
+
+    cap = cv2.VideoCapture(str(out))
+    left, right, seen = 1.0, 0.0, 0
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        cols = np.where((cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) > 200).any(axis=0))[0]
+        if cols.size:
+            left = min(left, cols.min() / 1080)
+            right = max(right, cols.max() / 1080)
+            seen += 1
+    cap.release()
+
+    assert seen > 5, "no captions were rendered at all"
+    assert left > 0.05, f"caption reaches the left edge ({left:.1%})"
+    assert right < 0.95, f"caption reaches the right edge ({right:.1%})"

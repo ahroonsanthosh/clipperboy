@@ -28,10 +28,12 @@
         <div id="dropzone" class="dropzone">
           <span class="dropzone-icon" aria-hidden="true">🎙️</span>
           <span class="dropzone-title">Drag &amp; drop your podcast here</span>
-          <label class="btn btn-secondary dropzone-browse" for="file-input">
+          <label class="btn btn-secondary dropzone-browse" for="file-input" tabindex="0">
             Browse your files
           </label>
-          <input id="file-input" class="file-input" type="file"
+          <!-- tabindex="-1": the styled label above is the visible, focusable
+               control; without this the input is an invisible extra tab stop. -->
+          <input id="file-input" class="file-input" type="file" tabindex="-1"
                  aria-describedby="dropzone-hint"
                  accept="video/*,audio/*,.mp4,.mov,.mkv,.webm,.avi,.m4v,.mp3,.m4a,.wav,.aac,.flac,.ogg,.opus">
           <p id="dropzone-hint" class="hint">Video or audio — MP4, MOV, MKV, WEBM, MP3, M4A, WAV.
