@@ -22,18 +22,20 @@
 
     <!-- STEP 1 — UPLOAD -->
     <section id="upload-section" aria-labelledby="upload-heading" class="panel">
-      <h2 id="upload-heading" class="step"><span class="step-num" aria-hidden="true">1</span> Choose your episode</h2>
+      <h2 id="upload-heading">Choose your episode</h2>
 
       <form id="upload-form">
-        <div id="dropzone" class="dropzone" tabindex="0" role="button"
-             aria-describedby="dropzone-hint"
-             aria-label="Choose a podcast file, or drag and drop one here">
+        <div id="dropzone" class="dropzone">
           <span class="dropzone-icon" aria-hidden="true">🎙️</span>
-          <span class="dropzone-title">Drag &amp; drop your podcast</span>
-          <span class="dropzone-sub">or <u>browse your files</u></span>
-          <p id="dropzone-hint" class="hint">Video or audio — MP4, MOV, MKV, WEBM, MP3, M4A, WAV. No size limit; it never leaves your computer.</p>
-          <input id="file-input" class="visually-hidden" type="file"
+          <span class="dropzone-title">Drag &amp; drop your podcast here</span>
+          <label class="btn btn-secondary dropzone-browse" for="file-input">
+            Browse your files
+          </label>
+          <input id="file-input" class="file-input" type="file"
+                 aria-describedby="dropzone-hint"
                  accept="video/*,audio/*,.mp4,.mov,.mkv,.webm,.avi,.m4v,.mp3,.m4a,.wav,.aac,.flac,.ogg,.opus">
+          <p id="dropzone-hint" class="hint">Video or audio — MP4, MOV, MKV, WEBM, MP3, M4A, WAV.
+            No size limit. Your file never leaves your computer.</p>
         </div>
 
         <p id="file-chosen" class="file-chosen" role="status" hidden></p>
@@ -42,42 +44,43 @@
           <legend>Clip settings</legend>
 
           <div class="option">
-            <label for="aspect">Aspect ratio</label>
+            <label for="aspect">Shape of the clips</label>
             <select id="aspect" name="aspect">
-              <option value="9:16" selected>9:16 — Reels, TikTok, Shorts</option>
-              <option value="1:1">1:1 — Square feed post</option>
-              <option value="16:9">16:9 — YouTube, landscape</option>
+              <option value="9:16" selected>Tall 9:16 — Reels, TikTok, Shorts</option>
+              <option value="1:1">Square 1:1 — feed posts</option>
+              <option value="16:9">Wide 16:9 — YouTube, landscape</option>
             </select>
-            <p class="option-hint">You can re-export any clip in another ratio afterwards.</p>
+            <p class="option-hint">You can change this per clip afterwards.</p>
           </div>
 
           <div class="option">
             <label for="clip-count">How many clips</label>
             <input id="clip-count" name="clip_count" type="number" min="1" max="20" value="8" inputmode="numeric">
-            <p class="option-hint">The highest-scoring, non-overlapping moments.</p>
+            <p class="option-hint">The best moments, spread across the episode.</p>
           </div>
 
           <div class="option">
-            <label for="compress">Compress source</label>
+            <label for="compress">Shrink the file first</label>
             <select id="compress" name="compress">
-              <option value="auto" selected>Automatic — only if the file is large</option>
-              <option value="always">Always — fastest processing</option>
+              <option value="auto" selected>Only if it's very large (recommended)</option>
+              <option value="always">Always — finishes sooner</option>
               <option value="never">Never — keep full quality</option>
             </select>
-            <p class="option-hint">Shrinks huge uploads to 1080p before analysis.</p>
+            <p class="option-hint">Big uploads are scaled to 1080p so the work goes faster.</p>
           </div>
         </fieldset>
 
-        <button id="start-btn" class="btn btn-primary btn-lg" type="submit" disabled>
+        <button id="start-btn" class="btn btn-primary btn-lg" type="submit">
           Find my clips
         </button>
+        <p id="start-hint" class="hint centre">Choose a file above to get started.</p>
         <p id="upload-error" class="error-msg" role="alert" hidden></p>
       </form>
     </section>
 
     <!-- STEP 2 — PROGRESS -->
     <section id="progress-section" aria-labelledby="progress-heading" class="panel" hidden>
-      <h2 id="progress-heading" class="step"><span class="step-num" aria-hidden="true">2</span> Working on it</h2>
+      <h2 id="progress-heading" tabindex="-1">Working on it</h2>
 
       <p id="progress-file" class="progress-file"></p>
 
@@ -94,8 +97,9 @@
 
       <ol id="stage-list" class="stage-list"></ol>
 
-      <p class="hint">Roughly real-time on a laptop: a 60-minute episode takes about 10–20 minutes.
-        Leave this tab open — you can keep using your computer.</p>
+      <p class="hint">A 60-minute episode usually takes 15–40 minutes, depending on your computer.
+        Clips appear below as soon as each one is finished — you can keep using your computer,
+        just leave this tab open.</p>
 
       <button id="cancel-btn" class="btn btn-quiet" type="button">Cancel and start over</button>
       <p id="job-error" class="error-msg" role="alert" hidden></p>
@@ -105,7 +109,7 @@
     <section id="results-section" aria-labelledby="results-heading" class="panel" hidden>
       <div class="results-head">
         <div>
-          <h2 id="results-heading" class="step"><span class="step-num" aria-hidden="true">3</span> Your clips</h2>
+          <h2 id="results-heading" tabindex="-1">Your clips</h2>
           <p id="results-summary" class="results-summary"></p>
         </div>
         <div class="results-actions">
@@ -128,16 +132,16 @@
 
   <footer class="site-footer">
     <div class="wrap">
-      <p>Clipperboy runs entirely on your machine — Whisper for transcription, FFmpeg for editing.
-         No accounts, no API keys, no uploads to anyone else.</p>
+      <p>Clipperboy runs entirely on your own computer — Whisper for transcription, FFmpeg for editing.
+         No account, no API key, nothing uploaded to anyone else.</p>
     </div>
   </footer>
 
   <!-- Clip preview dialog -->
-  <dialog id="preview-dialog" class="preview-dialog" aria-labelledby="preview-title">
+  <dialog id="preview-dialog" class="preview-dialog" aria-labelledby="preview-title" tabindex="-1">
     <div class="preview-head">
-      <h3 id="preview-title">Clip preview</h3>
-      <button id="preview-close" class="btn btn-quiet" type="button" aria-label="Close preview">Close</button>
+      <h2 id="preview-title">Clip preview</h2>
+      <button id="preview-close" class="btn btn-quiet" type="button">Close</button>
     </div>
     <video id="preview-video" controls playsinline preload="metadata"></video>
     <p id="preview-caption" class="preview-caption"></p>

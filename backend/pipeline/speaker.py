@@ -13,10 +13,14 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-SAMPLE_HZ = 2.0          # face lookups per second of clip
-SMOOTH_ALPHA = 0.22      # exponential smoothing on the camera path
+SAMPLE_HZ = 1.0          # face lookups per second of clip
+SMOOTH_ALPHA = 0.30      # exponential smoothing on the camera path
 DEADZONE_FRAC = 0.04     # ignore jitter smaller than this fraction of width
-MAX_STEP_FRAC = 0.03     # cap camera speed per sample to avoid whip pans
+MAX_STEP_FRAC = 0.05     # cap camera speed per sample to avoid whip pans
+
+# ffmpeg's expression parser rejects anything nested deeper than 100 levels, so
+# the camera path is emitted as a flat sum of gated terms and capped in length.
+MAX_KEYFRAMES = 60
 
 
 @dataclass
@@ -28,13 +32,25 @@ class CropPlan:
     mode: str                             # "speaker-tracked" | "centred" | "full-frame"
 
     def expression(self) -> str:
-        """ffmpeg crop-x expression: piecewise constant over the keyframes."""
+        """ffmpeg crop-x expression: piecewise constant over the keyframes.
+
+        Built as a flat sum of `gte(t,a)*lt(t,b)` gated terms rather than nested
+        if()s — ffmpeg's parser has a hard 100-level nesting limit, and a long
+        tracked clip easily exceeds it, which fails the render outright.
+        """
         if len(self.keyframes) <= 1:
             return str(self.keyframes[0][1] if self.keyframes else 0)
-        expr = str(self.keyframes[-1][1])
-        for t, x in reversed(self.keyframes[:-1]):
-            expr = f"if(lt(t,{t:.2f}),{x},{expr})"
-        return expr
+
+        terms = []
+        for i, (t, x) in enumerate(self.keyframes):
+            if i == 0:
+                gate = f"lt(t,{self.keyframes[1][0]:.2f})"
+            elif i == len(self.keyframes) - 1:
+                gate = f"gte(t,{t:.2f})"
+            else:
+                gate = f"gte(t,{t:.2f})*lt(t,{self.keyframes[i + 1][0]:.2f})"
+            terms.append(f"{x}*{gate}")
+        return "+".join(terms)
 
 
 _cascade: cv2.CascadeClassifier | None = None
@@ -133,4 +149,16 @@ def plan_crop(video: Path, start: float, end: float, src_w: int, src_h: int,
     if keyframes[0][0] > 0:
         keyframes.insert(0, (0.0, keyframes[0][1]))
 
+    keyframes = _decimate(keyframes, MAX_KEYFRAMES)
     return CropPlan(crop_w, crop_h, keyframes, faces_found, "speaker-tracked")
+
+
+def _decimate(keyframes: list[tuple[float, int]], limit: int) -> list[tuple[float, int]]:
+    """Thin a camera path down to `limit` points, keeping the largest moves."""
+    if len(keyframes) <= limit:
+        return keyframes
+    step = len(keyframes) / limit
+    kept = [keyframes[min(len(keyframes) - 1, int(i * step))] for i in range(limit)]
+    # Always keep the true start so the clip opens where the speaker actually is.
+    kept[0] = keyframes[0]
+    return kept

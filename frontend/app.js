@@ -11,12 +11,14 @@
     fileInput: $("file-input"),
     fileChosen: $("file-chosen"),
     startBtn: $("start-btn"),
+    startHint: $("start-hint"),
     uploadError: $("upload-error"),
     aspect: $("aspect"),
     clipCount: $("clip-count"),
     compress: $("compress"),
 
     progressSection: $("progress-section"),
+    progressHeading: $("progress-heading"),
     progressFile: $("progress-file"),
     progressBar: $("progress-bar"),
     progressPct: $("progress-pct"),
@@ -26,6 +28,7 @@
     jobError: $("job-error"),
 
     resultsSection: $("results-section"),
+    resultsHeading: $("results-heading"),
     resultsSummary: $("results-summary"),
     clipGrid: $("clip-grid"),
     downloadAll: $("download-all"),
@@ -45,7 +48,8 @@
   let selectedFile = null;
   let currentJobId = null;
   let pollTimer = null;
-  let lastRenderedSignature = "";
+  let lastSignature = "";
+  let announcedDone = false;
 
   // ---------- helpers ----------
   const fmtTime = (s) => {
@@ -56,9 +60,39 @@
   };
   const fmtSize = (mb) => (mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`);
 
+  // How each clip was framed, in words a creator actually uses.
+  const CROP_LABEL = {
+    "speaker-tracked": "follows the speaker",
+    "centred": "centre of frame",
+    "full-frame": "whole frame",
+    "audio-waveform": "audio, with waveform",
+  };
+
+  /** Turn engine-speak into something a human can act on. */
+  function friendlyError(raw) {
+    const text = String(raw || "");
+    const low = text.toLowerCase();
+    if (low.includes("cancelled")) return "You cancelled this episode.";
+    if (low.includes("speech model") || low.includes("huggingface")) {
+      return "The speech model couldn't be downloaded. Check your internet connection — " +
+             "this is only needed the first time you run Clipperboy.";
+    }
+    if (low.includes("no speech")) return "No speech was found in this file.";
+    if (low.includes("memory") || low.includes("allocate")) {
+      return "Your computer ran short of memory. Close other apps and try again.";
+    }
+    if (low.includes("duration") || low.includes("valid media")) {
+      return "That file couldn't be read as audio or video. Try exporting it again as MP4 or MP3.";
+    }
+    if (low.includes("ffmpeg") || low.includes("failed:")) {
+      return "Something went wrong while editing this clip. Trying again usually fixes it.";
+    }
+    return text || "Something went wrong.";
+  }
+
   function showError(node, message) {
-    node.textContent = message;
-    node.hidden = false;
+    node.hidden = false;                 // reveal first, so role="alert" fires on the text change
+    requestAnimationFrame(() => { node.textContent = message; });
   }
   function clearError(node) {
     node.textContent = "";
@@ -84,14 +118,10 @@
     selectedFile = file;
     el.fileChosen.hidden = false;
     el.fileChosen.textContent = `Selected: ${file.name} (${fmtSize(file.size / 1024 / 1024)})`;
-    el.startBtn.disabled = false;
+    el.startHint.hidden = true;
     clearError(el.uploadError);
   }
 
-  el.dropzone.addEventListener("click", () => el.fileInput.click());
-  el.dropzone.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); el.fileInput.click(); }
-  });
   el.fileInput.addEventListener("change", () => chooseFile(el.fileInput.files[0]));
 
   ["dragenter", "dragover"].forEach((evt) =>
@@ -106,13 +136,20 @@
     }));
   el.dropzone.addEventListener("drop", (e) => {
     const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
-    if (file) chooseFile(file);
+    if (file) {
+      el.fileInput.files = e.dataTransfer.files;
+      chooseFile(file);
+    }
   });
 
   // ---------- submit ----------
   el.form.addEventListener("submit", async (e) => {
     e.preventDefault();
-    if (!selectedFile) return;
+    if (!selectedFile) {
+      showError(el.uploadError, "Choose a podcast file first — drag one in, or use “Browse your files”.");
+      el.fileInput.focus();
+      return;
+    }
 
     clearError(el.uploadError);
     el.startBtn.disabled = true;
@@ -127,16 +164,17 @@
     try {
       const { job } = await api("/api/jobs", { method: "POST", body });
       currentJobId = job.id;
+      announcedDone = false;
+      lastSignature = "";
       el.uploadSection.hidden = true;
       el.progressSection.hidden = false;
       el.resultsSection.hidden = true;
       el.progressFile.textContent = job.filename;
-      lastRenderedSignature = "";
       renderProgress(job);
-      el.progressSection.scrollIntoView({ block: "start" });
+      el.progressHeading.focus();
       poll();
     } catch (err) {
-      showError(el.uploadError, err.message);
+      showError(el.uploadError, friendlyError(err.message));
       el.startBtn.disabled = false;
     } finally {
       el.startBtn.textContent = "Find my clips";
@@ -145,7 +183,7 @@
 
   el.cancelBtn.addEventListener("click", async () => {
     if (!currentJobId) return resetToUpload();
-    if (!confirm("Stop working on this episode and discard it?")) return;
+    if (!confirm("Stop working on this episode and discard its clips?")) return;
     try { await api(`/api/jobs/${currentJobId}`, { method: "DELETE" }); } catch (_) {}
     resetToUpload();
   });
@@ -158,15 +196,15 @@
     selectedFile = null;
     el.fileInput.value = "";
     el.fileChosen.hidden = true;
-    el.startBtn.disabled = true;
+    el.startHint.hidden = false;
+    el.startBtn.disabled = false;
     clearError(el.uploadError);
     clearError(el.jobError);
     el.uploadSection.hidden = false;
     el.progressSection.hidden = true;
     el.resultsSection.hidden = true;
     loadHistory();
-    el.uploadSection.scrollIntoView({ block: "start" });
-    el.dropzone.focus();
+    el.fileInput.focus();
   }
 
   // ---------- polling ----------
@@ -175,15 +213,24 @@
     try {
       const { job } = await api(`/api/jobs/${currentJobId}`);
       renderProgress(job);
+      renderResults(job);
 
       if (job.status === "failed") {
-        showError(el.jobError, job.error || "Processing failed.");
+        el.cancelBtn.textContent = "Start over";
+        showError(el.jobError, friendlyError(job.error));
         return;
       }
-      if (job.clips.length) renderResults(job);
-      if (job.status === "done") { loadHistory(); return; }
+      if (job.status === "done") {
+        el.progressSection.hidden = true;
+        if (!announcedDone) {
+          announcedDone = true;
+          el.resultsHeading.focus();
+        }
+        loadHistory();
+        return;
+      }
     } catch (err) {
-      showError(el.jobError, `Lost contact with the app: ${err.message}`);
+      showError(el.jobError, `Lost contact with Clipperboy — is it still running? (${err.message})`);
     }
     pollTimer = setTimeout(poll, 1500);
   }
@@ -215,36 +262,61 @@
 
   // ---------- results ----------
   function renderResults(job) {
-    const signature = JSON.stringify(job.clips.map((c) => [c.id, c.status, c.aspect, c.title]));
+    if (!job.clips.length) {
+      el.resultsSection.hidden = true;      // nothing to show yet
+      return;
+    }
     el.resultsSection.hidden = false;
-    if (signature === lastRenderedSignature) return;
-    lastRenderedSignature = signature;
+
+    const signature = JSON.stringify(
+      job.clips.map((c) => [c.id, c.status, c.aspect, c.title, c.error]));
+    if (signature === lastSignature) return;
+    lastSignature = signature;
 
     const ready = job.clips.filter((c) => c.status === "ready").length;
     const source = job.compressed
-      ? `${fmtSize(job.source_size_mb)} → ${fmtSize(job.working_size_mb)} after compression`
+      ? `${fmtSize(job.source_size_mb)} → ${fmtSize(job.working_size_mb)} after shrinking`
       : fmtSize(job.source_size_mb);
     el.resultsSummary.textContent =
-      `${ready} of ${job.clips.length} clips ready · from ${fmtTime(job.duration)} of ${job.has_video ? "video" : "audio"} · ${source}`;
+      `${ready} of ${job.clips.length} clips ready · from a ${fmtTime(job.duration)} ` +
+      `${job.has_video ? "video" : "audio"} episode · ${source}`;
 
-    el.downloadAll.href = `/api/jobs/${job.id}/download-all`;
     const noneReady = ready === 0;
+    el.downloadAll.href = noneReady ? "#" : `/api/jobs/${job.id}/download-all`;
     el.downloadAll.setAttribute("aria-disabled", String(noneReady));
-    el.downloadAll.classList.toggle("btn-disabled", noneReady);
-    el.downloadTranscript.href = `/api/jobs/${job.id}/transcript`;
+    el.downloadTranscript.href = `/api/jobs/${job.id}/transcript.txt`;
     el.downloadTranscript.hidden = !job.transcript_available;
 
+    // Remember what had focus / was expanded, so a background refresh doesn't
+    // yank the page out from under someone mid-read.
+    const activeId = document.activeElement ? document.activeElement.id : "";
+    const scrollY = window.scrollY;
+    const open = new Set(
+      [...el.clipGrid.querySelectorAll("details[open]")].map((d) => d.dataset.clip));
+
     el.clipGrid.innerHTML = "";
-    job.clips.forEach((clip) => el.clipGrid.append(buildClipCard(job, clip)));
+    job.clips.forEach((clip) => el.clipGrid.append(buildClipCard(job, clip, open)));
+
+    if (activeId) {
+      const restored = document.getElementById(activeId);
+      if (restored) restored.focus({ preventScroll: true });
+    }
+    window.scrollTo({ top: scrollY, behavior: "auto" });
   }
 
-  function buildClipCard(job, clip) {
+  el.downloadAll.addEventListener("click", (e) => {
+    if (el.downloadAll.getAttribute("aria-disabled") === "true") e.preventDefault();
+  });
+
+  function buildClipCard(job, clip, openTranscripts) {
     const li = document.createElement("li");
     li.className = "clip-card";
+    const uid = `${job.id}-${clip.id}`;
 
     if (clip.status === "ready") {
       const thumbBtn = document.createElement("button");
       thumbBtn.type = "button";
+      thumbBtn.id = `play-${uid}`;
       thumbBtn.className = "clip-thumb-btn";
       thumbBtn.setAttribute("aria-label", `Play preview of clip ${clip.index}: ${clip.title}`);
       const img = document.createElement("img");
@@ -270,18 +342,14 @@
 
     const meta = document.createElement("p");
     meta.className = "clip-meta";
-    const bits = [
-      `${Math.round(clip.duration)}s`,
-      `at ${fmtTime(clip.start)}–${fmtTime(clip.end)}`,
+    [
+      `${Math.round(clip.duration)} seconds`,
+      `at ${fmtTime(clip.start)} in the episode`,
       clip.aspect,
-    ];
-    if (clip.crop_mode === "speaker-tracked") bits.push("speaker tracked");
-    else if (clip.crop_mode === "centred") bits.push("centre crop");
-    else if (clip.crop_mode === "audio-waveform") bits.push("waveform visual");
-    bits.push(`score ${clip.score.toFixed(1)}`);
-    bits.forEach((b) => {
+      CROP_LABEL[clip.crop_mode] || "",
+    ].filter(Boolean).forEach((bit) => {
       const span = document.createElement("span");
-      span.textContent = b;
+      span.textContent = bit;
       meta.append(span);
     });
     body.append(meta);
@@ -296,12 +364,12 @@
     if (clip.reasons.length) {
       const ul = document.createElement("ul");
       ul.className = "chips";
-      ul.setAttribute("aria-label", "Why this moment was picked");
+      ul.setAttribute("aria-label", `Why clip ${clip.index} was picked`);
       clip.reasons.forEach((r) => {
-        const chipLi = document.createElement("li");
-        chipLi.className = "chip";
-        chipLi.textContent = r;
-        ul.append(chipLi);
+        const chip = document.createElement("li");
+        chip.className = "chip";
+        chip.textContent = r;
+        ul.append(chip);
       });
       body.append(ul);
     }
@@ -309,18 +377,20 @@
     if (clip.keywords.length) {
       const ul = document.createElement("ul");
       ul.className = "chips";
-      ul.setAttribute("aria-label", "Topics mentioned");
+      ul.setAttribute("aria-label", `Topics in clip ${clip.index}`);
       clip.keywords.slice(0, 5).forEach((k) => {
-        const chipLi = document.createElement("li");
-        chipLi.className = "chip chip-key";
-        chipLi.textContent = k;
-        ul.append(chipLi);
+        const chip = document.createElement("li");
+        chip.className = "chip chip-key";
+        chip.textContent = k;
+        ul.append(chip);
       });
       body.append(ul);
     }
 
     const details = document.createElement("details");
     details.className = "clip-transcript";
+    details.dataset.clip = clip.id;
+    if (openTranscripts && openTranscripts.has(clip.id)) details.open = true;
     const summary = document.createElement("summary");
     summary.textContent = "What's said in this clip";
     const transcript = document.createElement("p");
@@ -328,12 +398,13 @@
     details.append(summary, transcript);
     body.append(details);
 
-    const actions = document.createElement("div");
-    actions.className = "clip-actions";
-
     if (clip.status === "ready") {
+      const actions = document.createElement("div");
+      actions.className = "clip-actions";
+
       const dl = document.createElement("a");
       dl.className = "btn btn-primary";
+      dl.id = `dl-${uid}`;
       dl.href = `${clip.video}?download=true`;
       dl.setAttribute("download", "");
       dl.textContent = "Download";
@@ -343,66 +414,97 @@
       srt.className = "btn btn-secondary";
       srt.href = clip.srt;
       srt.setAttribute("download", "");
-      srt.textContent = "Captions (.srt)";
-      srt.setAttribute("aria-label", `Download subtitle file for clip ${clip.index}`);
+      srt.textContent = "Subtitles";
+      srt.setAttribute("aria-label", `Download the subtitle file for clip ${clip.index}`);
 
       actions.append(dl, srt);
       body.append(actions);
-
-      const reexport = document.createElement("div");
-      reexport.className = "reexport";
-      const selectId = `aspect-${job.id}-${clip.id}`;
-      const label = document.createElement("label");
-      label.setAttribute("for", selectId);
-      label.textContent = "Re-export as";
-      const select = document.createElement("select");
-      select.id = selectId;
-      ["9:16", "1:1", "16:9"].forEach((a) => {
-        const opt = document.createElement("option");
-        opt.value = a;
-        opt.textContent = a;
-        if (a === clip.aspect) opt.selected = true;
-        select.append(opt);
-      });
-      const go = document.createElement("button");
-      go.type = "button";
-      go.className = "btn btn-secondary";
-      go.textContent = "Go";
-      go.addEventListener("click", async () => {
-        if (select.value === clip.aspect) return;
-        go.disabled = true;
-        go.textContent = "Rendering…";
-        try {
-          await api(`/api/jobs/${job.id}/clips/${clip.id}/render`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ aspect: select.value, captions: true }),
-          });
-          lastRenderedSignature = "";
-          const { job: fresh } = await api(`/api/jobs/${job.id}`);
-          renderResults(fresh);
-        } catch (err) {
-          go.textContent = "Failed";
-          alert(`Could not re-export: ${err.message}`);
-        } finally {
-          go.disabled = false;
-        }
-      });
-      reexport.append(label, select, go);
-      body.append(reexport);
+      body.append(buildReexport(job, clip, uid));
     } else {
       const status = document.createElement("p");
       status.className = `clip-status is-${clip.status}`;
       status.setAttribute("role", "status");
       status.textContent =
-        clip.status === "failed" ? `Could not render this clip: ${clip.error}`
-        : clip.status === "rendering" ? "Rendering this clip…"
-        : "Queued for rendering…";
+        clip.status === "failed" ? friendlyError(clip.error)
+        : clip.status === "rendering" ? "Editing this clip now…"
+        : "Waiting to be edited…";
       body.append(status);
+
+      if (clip.status === "failed") {
+        const retry = document.createElement("button");
+        retry.type = "button";
+        retry.id = `retry-${uid}`;
+        retry.className = "btn btn-secondary";
+        retry.textContent = "Try this clip again";
+        retry.addEventListener("click", () => runRender(job, clip, clip.aspect, retry, "Trying again…"));
+        body.append(retry);
+      }
     }
 
     li.append(body);
     return li;
+  }
+
+  function buildReexport(job, clip, uid) {
+    const wrap = document.createElement("div");
+    wrap.className = "reexport";
+
+    const selectId = `aspect-${uid}`;
+    const label = document.createElement("label");
+    label.setAttribute("for", selectId);
+    label.textContent = "Also export as";
+
+    const select = document.createElement("select");
+    select.id = selectId;
+    [["9:16", "Tall 9:16"], ["1:1", "Square 1:1"], ["16:9", "Wide 16:9"]].forEach(([value, text]) => {
+      const opt = document.createElement("option");
+      opt.value = value;
+      opt.textContent = text;
+      if (value === clip.aspect) opt.selected = true;
+      select.append(opt);
+    });
+
+    const go = document.createElement("button");
+    go.type = "button";
+    go.id = `go-${uid}`;
+    go.className = "btn btn-secondary";
+    go.textContent = "Re-export";
+
+    const status = document.createElement("span");
+    status.setAttribute("role", "status");
+
+    go.addEventListener("click", () => {
+      if (select.value === clip.aspect) {
+        status.textContent = "Already this shape.";
+        return;
+      }
+      runRender(job, clip, select.value, go, "Re-exporting…", status);
+    });
+
+    wrap.append(label, select, go, status);
+    return wrap;
+  }
+
+  async function runRender(job, clip, aspect, button, busyLabel, status) {
+    const original = button.textContent;
+    button.disabled = true;
+    button.textContent = busyLabel;
+    if (status) status.textContent = "Working — this takes a few seconds.";
+    try {
+      await api(`/api/jobs/${job.id}/clips/${clip.id}/render`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ aspect, captions: true }),
+      });
+      lastSignature = "";
+      const { job: fresh } = await api(`/api/jobs/${job.id}`);
+      renderResults(fresh);
+    } catch (err) {
+      button.disabled = false;
+      button.textContent = original;
+      if (status) status.textContent = friendlyError(err.message);
+      else showError(el.jobError, friendlyError(err.message));
+    }
   }
 
   // ---------- preview dialog ----------
@@ -411,27 +513,38 @@
   function openPreview(clip) {
     lastFocused = document.activeElement;
     el.dialogTitle.textContent = `${clip.index}. ${clip.title}`;
+    el.dialog.dataset.aspect = clip.aspect;
     el.dialogVideo.src = clip.video;
     el.dialogCaption.textContent =
-      `${Math.round(clip.duration)}s · ${clip.aspect} · from ${fmtTime(clip.start)} in the episode`;
+      `${Math.round(clip.duration)} seconds · ${clip.aspect} · from ${fmtTime(clip.start)} in the episode`;
     if (typeof el.dialog.showModal === "function") el.dialog.showModal();
     else el.dialog.setAttribute("open", "");
-    el.dialogVideo.play().catch(() => { /* autoplay blocked — controls are there */ });
+    el.dialogClose.focus();
+    el.dialogVideo.play().catch(() => { /* autoplay blocked — the controls are there */ });
   }
 
-  function closePreview() {
+  function teardownPreview() {
     el.dialogVideo.pause();
     el.dialogVideo.removeAttribute("src");
     el.dialogVideo.load();
-    if (el.dialog.open && typeof el.dialog.close === "function") el.dialog.close();
-    else el.dialog.removeAttribute("open");
-    if (lastFocused) lastFocused.focus();
+    if (lastFocused && document.contains(lastFocused)) lastFocused.focus();
   }
 
-  el.dialogClose.addEventListener("click", closePreview);
-  el.dialog.addEventListener("close", closePreview);
+  el.dialogClose.addEventListener("click", () => {
+    if (typeof el.dialog.close === "function") el.dialog.close();
+    else { el.dialog.removeAttribute("open"); teardownPreview(); }
+  });
+  el.dialog.addEventListener("close", teardownPreview);
   el.dialog.addEventListener("click", (e) => {
-    if (e.target === el.dialog) closePreview();   // click on the backdrop
+    if (e.target === el.dialog && typeof el.dialog.close === "function") el.dialog.close();
+  });
+  // Keep Tab inside the dialog rather than letting it escape to the page behind.
+  el.dialog.addEventListener("keydown", (e) => {
+    if (e.key !== "Tab") return;
+    const stops = [el.dialogClose, el.dialogVideo];
+    const i = stops.indexOf(document.activeElement);
+    e.preventDefault();
+    stops[(i + (e.shiftKey ? stops.length - 1 : 1) + stops.length) % stops.length].focus();
   });
 
   // ---------- history ----------
@@ -452,7 +565,7 @@
         const readyCount = job.clips.filter((c) => c.status === "ready").length;
         meta.textContent = job.status === "done"
           ? `${readyCount} clips · ${fmtTime(job.duration)} episode`
-          : job.status === "failed" ? `Failed: ${job.error}` : `${job.stage_label}…`;
+          : job.status === "failed" ? friendlyError(job.error) : `${job.stage_label}…`;
         info.append(name, meta);
 
         const actions = document.createElement("div");
@@ -462,19 +575,22 @@
         open.type = "button";
         open.className = "btn btn-secondary";
         open.textContent = "Open";
+        open.setAttribute("aria-label", `Open ${job.filename}`);
         open.addEventListener("click", async () => {
           clearTimeout(pollTimer);
           currentJobId = job.id;
-          lastRenderedSignature = "";
+          lastSignature = "";
+          announcedDone = job.status === "done";
+          clearError(el.jobError);
           el.uploadSection.hidden = true;
-          el.progressSection.hidden = job.status === "done";
           el.progressFile.textContent = job.filename;
           const { job: fresh } = await api(`/api/jobs/${job.id}`);
+          el.progressSection.hidden = fresh.status === "done";
           renderProgress(fresh);
           renderResults(fresh);
           loadHistory();
           if (fresh.status !== "done" && fresh.status !== "failed") poll();
-          el.resultsSection.scrollIntoView({ block: "start" });
+          (fresh.status === "done" ? el.resultsHeading : el.progressHeading).focus();
         });
 
         const del = document.createElement("button");

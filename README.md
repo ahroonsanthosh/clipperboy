@@ -22,8 +22,9 @@ limits, nothing sent to a third party. Every component is free and open source.
    self-containment — then picking the best non-overlapping set. Sponsor reads,
    intros and outros are actively penalised.
 5. **Edits each clip**: crops to **9:16** with the speaker tracked by face
-   detection, and burns in **word-by-word captions**. Audio-only episodes get an
-   animated waveform card instead.
+   detection, and burns in **word-by-word captions** — kept inside the safe area
+   so TikTok and Reels chrome never covers them. Audio-only episodes get an
+   animated audiogram card with the clip title instead.
 6. **Shows you everything**: title, summary, why it was picked, topics, exact
    source timecode, and the full transcript of the clip — with one-click
    download.
@@ -44,9 +45,9 @@ docker compose up --build
 
 Then open **<http://localhost:8000>**.
 
-### Option B — Python directly
+### Option B — Python directly (macOS / Linux)
 
-You need Python 3.10+ and FFmpeg.
+You need Python 3.10–3.12 and FFmpeg.
 
 ```bash
 # install ffmpeg first:
@@ -59,11 +60,18 @@ cd clipperboy
 ./run.sh
 ```
 
-`run.sh` creates a virtualenv and installs dependencies on first run, then
+On **Windows**, install [Python](https://python.org) and FFmpeg
+(`winget install Gyan.FFmpeg`), then double-click **`run.bat`** — or just use
+Docker, which needs neither.
+
+Either script creates a virtualenv and installs dependencies on first run, then
 serves the app at **<http://localhost:8000>**.
 
-> **First run downloads the speech model** (~150 MB for `base`) from
-> huggingface.co. It's cached afterwards, and everything else works offline.
+> **The first upload pauses to download the speech model** (~150 MB for `base`)
+> from huggingface.co, and the progress bar sits on "Loading speech model" for a
+> few minutes while it does. It is cached in `./data/models` afterwards, and
+> everything else works offline. If huggingface.co is unreachable, Clipperboy
+> says so rather than failing silently.
 
 ---
 
@@ -81,9 +89,13 @@ without re-running the analysis.
 
 ### How long does it take?
 
-Roughly **⅕ to ⅓ of the episode length** on a modern laptop CPU — so a 60-minute
-episode lands around 10–20 minutes. Transcription is the slow part; it's much
-faster on a machine with an NVIDIA GPU (detected automatically).
+For a 60-minute episode, budget **15–40 minutes** on a recent laptop (Apple
+silicon or a modern 8-core Intel/AMD). On an older dual-core machine it can take
+an hour or more. Transcription is the slow part, and it is dramatically faster on
+a machine with an NVIDIA GPU — that's detected and used automatically.
+
+Want it faster? Set `CLIPPERBOY_WHISPER_MODEL=tiny`, choose "Always" for shrink
+the file first, or ask for fewer clips.
 
 ---
 
@@ -100,7 +112,7 @@ Set these as environment variables (or in `docker-compose.yml`):
 | `CLIPPERBOY_COMPRESS_MB` | `800` | Above this file size, "automatic" compression kicks in. |
 | `CLIPPERBOY_DATA` | `./data` | Where uploads, clips and models are stored. |
 | `CLIPPERBOY_USE_OLLAMA` | `auto` | `off` to disable the optional local-LLM title polish. |
-| `OLLAMA_MODEL` / `OLLAMA_HOST` | `llama3.2` / `localhost:11434` | Optional: if you run [Ollama](https://ollama.com), titles and summaries are written by a local model. Purely optional — it never blocks a run. |
+| `CLIPPERBOY_OLLAMA_MODEL` / `OLLAMA_HOST` | `llama3.2` / `http://127.0.0.1:11434` | Optional: if you run [Ollama](https://ollama.com), titles and summaries are written by a local model. Purely optional — it never blocks a run. |
 
 ---
 
@@ -117,14 +129,19 @@ The interface is built to be usable without a mouse or without sight:
   system setting.
 - Respects `prefers-reduced-motion`.
 - Every clip ships with an `.srt` subtitle file alongside the burned-in captions,
-  and the full transcript is downloadable as JSON.
+  and the full episode transcript downloads as timestamped plain text.
+- Touch targets are at least 44 px, and results refresh in place without
+  stealing focus or collapsing anything you have open.
 
 ---
 
 ## Development
 
 ```bash
-./.venv/bin/python -m pytest tests -q
+./run.sh                                   # creates .venv on first run, then Ctrl+C
+./.venv/bin/pip install -r requirements-dev.txt
+sudo apt install espeak-ng                 # macOS: brew install espeak-ng
+./.venv/bin/python -m pytest tests -q      # ~6 minutes; it renders real video
 ```
 
 The suite generates its own synthetic podcast fixture with espeak-ng + FFmpeg
@@ -148,6 +165,7 @@ backend/
     captions.py       ASS (burned-in) + SRT generation
     render.py         final clip render
 frontend/             plain HTML/CSS/JS, no build step
+assets/fonts/         bundled DejaVu, so captions look the same on every OS
 tests/
 ```
 

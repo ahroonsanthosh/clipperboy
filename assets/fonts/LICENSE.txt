@@ -1,0 +1,7 @@
+DejaVu Fonts — bundled so captions render identically on macOS, Windows and Linux.
+
+Fonts are (c) Bitstream Inc. and (c) Tavmjong Bah, released under the
+Bitstream Vera Fonts Copyright and the DejaVu Fonts license, both of which
+permit free use, modification and redistribution.
+
+Full licence: https://dejavu-fonts.github.io/License.html

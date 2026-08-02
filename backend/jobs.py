@@ -81,7 +81,21 @@ class JobStore:
     def __init__(self) -> None:
         self._jobs: dict[str, Job] = {}
         self._lock = threading.Lock()
+        self._cancelled: set[str] = set()
         self._load_existing()
+
+    def cancel(self, job_id: str) -> None:
+        """Ask a running worker to stop at its next checkpoint."""
+        with self._lock:
+            self._cancelled.add(job_id)
+
+    def is_cancelled(self, job_id: str) -> bool:
+        return job_id in self._cancelled
+
+    def discard_cancelled(self, job_id: str) -> None:
+        """Called by a worker once it has actually stopped."""
+        with self._lock:
+            self._cancelled.discard(job_id)
 
     # --- persistence ---------------------------------------------------
     def _job_dir(self, job_id: str) -> Path:
@@ -103,8 +117,14 @@ class JobStore:
                 continue
 
     def persist(self, job: Job) -> None:
+        # A cancelled job's directory is being torn down; writing would recreate it.
+        if job.id not in self._jobs or job.id in self._cancelled:
+            return
         try:
-            (self._job_dir(job.id) / "job.json").write_text(json.dumps(job.to_dict(), indent=2))
+            target = self._job_dir(job.id) / "job.json"
+            tmp = target.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(job.to_dict(), indent=2))
+            tmp.replace(target)   # atomic: a crash mid-write can't corrupt the job
         except Exception:
             pass
 
@@ -134,12 +154,17 @@ class JobStore:
 
         with self._lock:
             job = self._jobs.pop(job_id, None)
+            self._cancelled.add(job_id)
         if not job:
+            self._cancelled.discard(job_id)
             return False
         for path in (config.CLIP_DIR / job_id, config.WORK_DIR / job_id):
             shutil.rmtree(path, ignore_errors=True)
         for leftover in config.UPLOAD_DIR.glob(f"{job_id}.*"):
             leftover.unlink(missing_ok=True)
+        if job.status != "running":
+            # Nothing is going to call discard_cancelled for us.
+            self.discard_cancelled(job_id)
         return True
 
 
@@ -148,7 +173,17 @@ STORE = JobStore()
 
 # --- worker -------------------------------------------------------------
 
+class Cancelled(RuntimeError):
+    pass
+
+
+def _check_cancelled(job: Job) -> None:
+    if STORE.is_cancelled(job.id):
+        raise Cancelled("Cancelled by the user")
+
+
 def _set_stage(job: Job, key: str, progress: float, message: str = "") -> None:
+    _check_cancelled(job)
     job.stage = key
     job.stage_label = dict(STAGES).get(key, key)
     job.progress = round(max(0.0, min(1.0, progress)), 4)
@@ -217,6 +252,7 @@ def process(job_id: str, source_path: Path, compress_mode: str) -> None:
         candidates = score.find_clips(
             tr, envelope, hz, job.clip_count,
             progress=lambda m: _set_stage(job, "analyse", (lo + hi) / 2, m),
+            scan_progress=lambda frac, m: _set_stage(job, "analyse", lo + (hi - lo) * frac, m),
         )
         _set_stage(job, "analyse", hi, f"Found {len(candidates)} strong moments")
 
@@ -249,6 +285,7 @@ def process(job_id: str, source_path: Path, compress_mode: str) -> None:
                     out_thumb=clip_dir / f"clip-{clip.id}.jpg",
                     out_srt=clip_dir / f"clip-{clip.id}.srt",
                     work_dir=work,
+                    title=clip.title,
                 )
                 clip.video = f"/api/jobs/{job.id}/clips/{clip.id}/video"
                 clip.thumbnail = f"/api/jobs/{job.id}/clips/{clip.id}/thumbnail"
@@ -265,6 +302,9 @@ def process(job_id: str, source_path: Path, compress_mode: str) -> None:
         job.status = "done"
         _set_stage(job, "done", 1.0, f"{ready} clip{'s' if ready != 1 else ''} ready to download")
 
+    except Cancelled:
+        job.status = "failed"
+        job.error = "Cancelled."
     except Exception as exc:
         job.status = "failed"
         job.error = f"{exc}"[:800]
@@ -272,7 +312,28 @@ def process(job_id: str, source_path: Path, compress_mode: str) -> None:
         traceback.print_exc()
         STORE.persist(job)
     finally:
-        for tmp in work.glob("*.wav"):
+        _cleanup_work(job_id, keep_source=not STORE.is_cancelled(job_id))
+        STORE.discard_cancelled(job_id)
+
+
+def _cleanup_work(job_id: str, keep_source: bool = True) -> None:
+    """Drop the large intermediates. `source.mp4` is kept so a clip can be
+    re-exported in another aspect ratio without re-uploading the episode."""
+    import shutil
+
+    work = config.WORK_DIR / job_id
+    if not keep_source:
+        # The job was cancelled or deleted: sweep up anything the worker wrote
+        # after the delete request came in.
+        for path in (work, config.CLIP_DIR / job_id):
+            shutil.rmtree(path, ignore_errors=True)
+        for leftover in config.UPLOAD_DIR.glob(f"{job_id}.*"):
+            leftover.unlink(missing_ok=True)
+        return
+    if not work.exists():
+        return
+    for pattern in ("*.wav", "*.ass", "*.title.txt", "*.part.mp4"):
+        for tmp in work.glob(pattern):
             tmp.unlink(missing_ok=True)
 
 
@@ -302,6 +363,7 @@ def rerender_clip(job: Job, clip: Clip, aspect: str, burn_captions: bool = True)
             out_srt=clip_dir / f"clip-{clip.id}.srt",
             work_dir=work,
             burn_captions=burn_captions,
+            title=clip.title,
         )
         clip.aspect = aspect
         clip.crop_mode = result.crop_mode

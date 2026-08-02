@@ -16,6 +16,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY backend ./backend
 COPY frontend ./frontend
+COPY assets ./assets
+
+RUN mkdir -p /app/data && chmod 777 /app/data
 
 ENV CLIPPERBOY_DATA=/app/data \
     PYTHONUNBUFFERED=1 \

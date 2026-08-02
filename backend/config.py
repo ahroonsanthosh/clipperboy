@@ -29,6 +29,10 @@ DEFAULT_CLIP_COUNT = int(os.environ.get("CLIPPERBOY_CLIP_COUNT", 8))
 # Source compression: transcode oversized sources to speed the pipeline up.
 COMPRESS_THRESHOLD_MB = float(os.environ.get("CLIPPERBOY_COMPRESS_MB", 800))
 
+# Captions use a bundled font so clips look identical on macOS, Windows and Linux.
+FONTS_DIR = ROOT / "assets" / "fonts"
+CAPTION_FONT = os.environ.get("CLIPPERBOY_CAPTION_FONT", "DejaVu Sans")
+
 FFMPEG = os.environ.get("FFMPEG_BIN", "ffmpeg")
 FFPROBE = os.environ.get("FFPROBE_BIN", "ffprobe")
 

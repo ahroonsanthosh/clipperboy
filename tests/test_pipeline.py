@@ -245,3 +245,101 @@ def test_captions_are_actually_burned_into_the_picture(video_fixture, tmp_path, 
     assert with_caps.shape == without.shape
     changed = float(np.mean(np.abs(with_caps.astype(float) - without.astype(float))))
     assert changed > 1.0, "caption band looks identical — captions were not burned in"
+
+
+# --- regressions ----------------------------------------------------------
+
+def test_long_crop_expression_is_accepted_by_ffmpeg(video_fixture, tmp_path):
+    """ffmpeg's expression parser rejects >100 nested calls; a long tracked
+    clip used to produce exactly that and fail the whole render."""
+    keyframes = [(i * 0.5, 100 + (i % 40)) for i in range(151)]
+    plan = speaker.CropPlan(404, 720, keyframes, faces_found=151, mode="speaker-tracked")
+    assert "if(" not in plan.expression()
+
+    out = tmp_path / "long.mp4"
+    subprocess.run([
+        "ffmpeg", "-y", "-ss", "2", "-i", str(video_fixture), "-t", "2",
+        "-vf", f"setpts=PTS-STARTPTS,crop=404:720:x='{plan.expression()}':y=(ih-oh)/2",
+        "-c:v", "libx264", "-preset", "ultrafast", "-an", str(out),
+    ], check=True, capture_output=True)
+    assert media.probe(out).width == 404
+
+
+def test_crop_expression_holds_the_first_keyframe(video_fixture):
+    """The opening position must be honoured, not skipped."""
+    plan = speaker.CropPlan(400, 720, [(0.0, 111), (5.0, 222)], 2, "speaker-tracked")
+    expr = plan.expression()
+    assert "111" in expr and "222" in expr
+    assert expr.startswith("111*lt(t,5.00)")
+
+
+def test_plan_crop_caps_keyframe_count(video_fixture):
+    info = media.probe(video_fixture)
+    plan = speaker.plan_crop(video_fixture, 0.0, info.duration, info.width, info.height, 9 / 16)
+    assert len(plan.keyframes) <= speaker.MAX_KEYFRAMES
+
+
+def test_render_falls_back_to_centre_crop_when_tracking_fails(
+        video_fixture, tmp_path, fake_transcript, monkeypatch):
+    info = media.probe(video_fixture)
+    tr = fake_transcript(info.duration)
+
+    # A plan whose expression ffmpeg cannot evaluate at all.
+    broken = speaker.CropPlan(405, 720, [(0.0, 0)], 5, "speaker-tracked")
+    monkeypatch.setattr(broken, "expression", lambda: "this-is-not-an-expression")
+    monkeypatch.setattr(speaker, "plan_crop", lambda *a, **k: broken)
+
+    result = render.render_clip(
+        source=video_fixture, info=info, start=4.0, end=14.0, words=tr.words,
+        aspect="9:16", out_video=tmp_path / "fb.mp4", out_thumb=tmp_path / "fb.jpg",
+        out_srt=tmp_path / "fb.srt", work_dir=tmp_path,
+    )
+    assert result.crop_mode == "centred"
+    assert media.probe(result.video_path).width == 1080
+
+
+def test_audio_card_has_no_black_band(audio_fixture, tmp_path, fake_transcript):
+    """showwaves/showfreqs render on opaque black; without colour-keying, the
+    card showed a hard black rectangle across the middle."""
+    import cv2
+    import numpy as np
+
+    info = media.probe(audio_fixture)
+    tr = fake_transcript(info.duration)
+    result = render.render_clip(
+        source=audio_fixture, info=info, start=8.0, end=20.0, words=tr.words,
+        aspect="9:16", out_video=tmp_path / "card.mp4", out_thumb=tmp_path / "card.jpg",
+        out_srt=tmp_path / "card.srt", work_dir=tmp_path, title="A test clip title",
+    )
+    png = tmp_path / "card.png"
+    subprocess.run(["ffmpeg", "-y", "-ss", "4", "-i", str(result.video_path),
+                    "-frames:v", "1", str(png)], check=True, capture_output=True)
+    img = cv2.imread(str(png))
+
+    # The card background is 0x0E1116; pure black anywhere means the band is back.
+    band = img[int(img.shape[0] * 0.35):int(img.shape[0] * 0.65), :, :]
+    pure_black = float(np.mean(np.all(band < 4, axis=2)))
+    assert pure_black < 0.02, f"{pure_black:.1%} of the card centre is pure black"
+
+
+def test_audio_card_draws_the_clip_title(audio_fixture, tmp_path, fake_transcript):
+    import cv2
+    import numpy as np
+
+    info = media.probe(audio_fixture)
+    tr = fake_transcript(info.duration)
+
+    def top_band(title: str, name: str):
+        result = render.render_clip(
+            source=audio_fixture, info=info, start=8.0, end=16.0, words=tr.words,
+            aspect="9:16", out_video=tmp_path / f"{name}.mp4",
+            out_thumb=tmp_path / f"{name}.jpg", out_srt=tmp_path / f"{name}.srt",
+            work_dir=tmp_path, title=title,
+        )
+        png = tmp_path / f"{name}.png"
+        subprocess.run(["ffmpeg", "-y", "-ss", "2", "-i", str(result.video_path),
+                        "-frames:v", "1", str(png)], check=True, capture_output=True)
+        img = cv2.imread(str(png))
+        return img[int(img.shape[0] * 0.10):int(img.shape[0] * 0.22), :, :].astype(float)
+
+    assert float(np.mean(np.abs(top_band("Focus beats hours", "titled") - top_band("", "plain")))) > 1.0

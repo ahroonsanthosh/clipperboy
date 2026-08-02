@@ -11,8 +11,14 @@ from pathlib import Path
 from backend.pipeline.transcribe import Word
 
 WORDS_PER_LINE = 4
-MAX_LINE_CHARS = 26
+MAX_LINE_CHARS = 20
 GAP_BREAK = 0.7          # a pause longer than this starts a new caption line
+
+# Social platforms overlay their own UI on top of the video. Keep captions
+# inside the area that stays visible on TikTok, Reels and Shorts.
+SIDE_MARGIN_FRAC = 0.10   # 10% each side clears the right-hand action rail
+BOTTOM_MARGIN_FRAC = 0.22  # clears the caption/username chrome along the bottom
+FONT_FRAC = 0.062         # of the *shorter* edge, so every aspect gets sane text
 
 # ASS colours are &HAABBGGRR (alpha, blue, green, red).
 COLOUR_BASE = "&H00FFFFFF"    # white
@@ -65,20 +71,24 @@ def build_ass(words: list[Word], clip_start: float, clip_end: float,
               width: int, height: int, out_path: Path,
               font: str = "DejaVu Sans") -> Path:
     """Write an ASS file with clip-relative timings."""
-    font_size = max(28, int(height * 0.055))
-    margin_v = int(height * 0.14)
+    font_size = max(28, int(min(width, height) * FONT_FRAC))
+    margin_v = int(height * BOTTOM_MARGIN_FRAC)
+    margin_h = int(width * SIDE_MARGIN_FRAC)
     outline = max(2, int(font_size * 0.10))
 
+    # WrapStyle 0 lets libass wrap anything that would otherwise overflow the
+    # margins onto a second line — without it, long lines are sliced off at the
+    # frame edge. group_words() keeps lines short enough that this rarely fires.
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {width}
 PlayResY: {height}
-WrapStyle: 2
+WrapStyle: 0
 ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Caption,{font},{font_size},{COLOUR_BASE},{COLOUR_BASE},{COLOUR_OUTLINE},{COLOUR_OUTLINE},-1,0,0,0,100,100,0,0,1,{outline},0,2,{int(width * 0.06)},{int(width * 0.06)},{margin_v},1
+Style: Caption,{font},{font_size},{COLOUR_BASE},{COLOUR_BASE},{COLOUR_OUTLINE},{COLOUR_OUTLINE},-1,0,0,0,100,100,0,0,1,{outline},0,2,{margin_h},{margin_h},{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text

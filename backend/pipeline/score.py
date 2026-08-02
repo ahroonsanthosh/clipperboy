@@ -109,16 +109,22 @@ def to_sentences(tr: Transcript) -> list[Sentence]:
     last_end = 0.0
 
     for seg in tr.segments:
+        # A long pause ends the *previous* sentence — flush before absorbing
+        # this segment, or the new thought gets glued onto the old one.
+        if buf_text and buf_start is not None and (seg.start - last_end) > 1.2:
+            sentences.append(Sentence(buf_start, last_end, " ".join(buf_text).strip(),
+                                      list(buf_words)))
+            buf_text, buf_words, buf_start = [], [], None
+
         if buf_start is None:
             buf_start = seg.start
-        gap = seg.start - last_end if buf_text else 0.0
         buf_text.append(seg.text.strip())
         buf_words.extend(seg.words)
         last_end = seg.end
 
         joined = " ".join(buf_text).strip()
         long_enough = (last_end - buf_start) >= 2.0
-        if (_SENT_END.search(joined) and long_enough) or gap > 1.2 or (last_end - buf_start) > 18:
+        if (_SENT_END.search(joined) and long_enough) or (last_end - buf_start) > 18:
             sentences.append(Sentence(buf_start, last_end, joined, list(buf_words)))
             buf_text, buf_words, buf_start = [], [], None
 
@@ -133,7 +139,19 @@ def _count_any(text: str, phrases) -> int:
     return sum(1 for p in phrases if p in text)
 
 
-def _envelope_stats(env: np.ndarray, hz: int, start: float, end: float) -> tuple[float, float, float]:
+def loudness_reference(env: np.ndarray) -> float:
+    """The 95th-percentile loudness, used to normalise every window.
+
+    Hoisted out of the per-window scorer: it is constant for an episode, and
+    recomputing it for each of ~10,000 candidates dominated the analysis stage.
+    """
+    if env.size == 0:
+        return 1.0
+    return float(np.percentile(env, 95)) or 1.0
+
+
+def _envelope_stats(env: np.ndarray, hz: int, start: float, end: float,
+                    ref: float | None = None) -> tuple[float, float, float]:
     """(mean loudness, variability, peak) for a time range, all 0-1ish."""
     if env.size == 0:
         return 0.0, 0.0, 0.0
@@ -142,7 +160,7 @@ def _envelope_stats(env: np.ndarray, hz: int, start: float, end: float) -> tuple
     window = env[a:b]
     if window.size == 0:
         return 0.0, 0.0, 0.0
-    ref = float(np.percentile(env, 95)) or 1.0
+    ref = loudness_reference(env) if ref is None else ref
     return (
         float(window.mean() / ref),
         float(window.std() / ref),
@@ -163,7 +181,7 @@ def keywords_for(text: str, limit: int = 6) -> list[str]:
 # --- scoring --------------------------------------------------------------
 
 def score_window(sents: list[Sentence], env: np.ndarray, hz: int,
-                 total_duration: float) -> Candidate:
+                 total_duration: float, ref: float | None = None) -> Candidate:
     start, end = sents[0].start, sents[-1].end
     text = " ".join(s.text for s in sents).strip()
     low = text.lower()
@@ -183,7 +201,7 @@ def score_window(sents: list[Sentence], env: np.ndarray, hz: int,
     ads = _count_any(low, AD_MARKERS)
     numbers = len(re.findall(r"\b\d[\d,.]*\b", text))
 
-    loud_mean, loud_var, loud_peak = _envelope_stats(env, hz, start, end)
+    loud_mean, loud_var, loud_peak = _envelope_stats(env, hz, start, end, ref)
     wpm = (word_count / duration) * 60 if duration else 0
 
     # Self-containment: does it open cleanly and close on a full stop?
@@ -262,17 +280,20 @@ def score_window(sents: list[Sentence], env: np.ndarray, hz: int,
 
 
 def build_candidates(sents: list[Sentence], env: np.ndarray, hz: int,
-                     total_duration: float) -> list[Candidate]:
+                     total_duration: float, progress=None) -> list[Candidate]:
     out: list[Candidate] = []
     n = len(sents)
+    ref = loudness_reference(env)
     for i in range(n):
+        if progress and n > 50 and i % 50 == 0:
+            progress(i / n, f"Scoring moments… {int(i / n * 100)}%")
         for j in range(i, n):
             dur = sents[j].end - sents[i].start
             if dur < config.MIN_CLIP_SEC:
                 continue
             if dur > config.MAX_CLIP_SEC:
                 break
-            out.append(score_window(sents[i:j + 1], env, hz, total_duration))
+            out.append(score_window(sents[i:j + 1], env, hz, total_duration, ref))
     return out
 
 
@@ -372,11 +393,11 @@ def _ollama_enrich(cands: list[Candidate], progress=None) -> None:
 
 
 def find_clips(tr: Transcript, env: np.ndarray, hz: int, count: int,
-               progress=None) -> list[Candidate]:
+               progress=None, scan_progress=None) -> list[Candidate]:
     sents = to_sentences(tr)
     if not sents:
         return []
-    cands = build_candidates(sents, env, hz, tr.duration)
+    cands = build_candidates(sents, env, hz, tr.duration, progress=scan_progress)
     if not cands:
         # Podcast shorter than one minimum-length window: use the whole thing.
         cands = [score_window(sents, env, hz, tr.duration)]

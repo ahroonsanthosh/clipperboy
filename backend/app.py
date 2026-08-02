@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import json
 import shutil
+import uuid
 import zipfile
 from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from backend import config, jobs
@@ -67,7 +68,7 @@ def health() -> dict:
 
 
 @app.post("/api/jobs")
-async def create_job(
+def create_job(
     file: UploadFile,
     aspect: str = Form(config.DEFAULT_ASPECT),
     clip_count: int = Form(config.DEFAULT_CLIP_COUNT),
@@ -93,7 +94,7 @@ async def create_job(
         with dest.open("wb") as out:
             shutil.copyfileobj(file.file, out, length=1024 * 1024)
     finally:
-        await file.close()
+        file.file.close()
 
     if dest.stat().st_size == 0:
         dest.unlink(missing_ok=True)
@@ -129,6 +130,31 @@ def get_transcript(job_id: str) -> FileResponse:
         raise HTTPException(404, "Transcript not ready yet")
     return FileResponse(path, media_type="application/json",
                         filename=f"{_safe_slug(job.filename, 'episode')}-transcript.json")
+
+
+@app.get("/api/jobs/{job_id}/transcript.txt")
+def get_transcript_text(job_id: str) -> Response:
+    """The episode transcript as readable, timestamped plain text."""
+    job = _get_job(job_id)
+    path = config.CLIP_DIR / job.id / "transcript.json"
+    if not path.exists():
+        raise HTTPException(404, "Transcript not ready yet")
+
+    data = json.loads(path.read_text())
+    lines = [f"Transcript — {job.filename}", ""]
+    for seg in data.get("segments", []):
+        stamp = int(seg["start"])
+        h, rem = divmod(stamp, 3600)
+        m, s = divmod(rem, 60)
+        clock = f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+        lines.append(f"[{clock}] {seg['text'].strip()}")
+
+    name = f"{_safe_slug(job.filename, 'episode')}-transcript.txt"
+    return Response(
+        "\n".join(lines),
+        media_type="text/plain; charset=utf-8",
+        headers={"content-disposition": f'attachment; filename="{name}"'},
+    )
 
 
 @app.get("/api/jobs/{job_id}/clips/{clip_id}/video")
@@ -172,8 +198,12 @@ def rerender(job_id: str, clip_id: str, payload: dict) -> dict:
         jobs.rerender_clip(job, clip, aspect, bool(payload.get("captions", True)))
     except FileNotFoundError as exc:
         raise HTTPException(410, str(exc))
-    except Exception as exc:
-        raise HTTPException(500, f"Re-render failed: {exc}")
+    except Exception:
+        raise HTTPException(
+            500,
+            "This clip couldn't be re-exported. This usually means the machine ran "
+            "short of memory — close other apps and try again.",
+        )
     return {"clip": json.loads(json.dumps(clip, default=lambda o: o.__dict__))}
 
 
@@ -185,7 +215,8 @@ def download_all(job_id: str) -> FileResponse:
         raise HTTPException(404, "No finished clips to download yet")
 
     bundle = config.CLIP_DIR / job.id / "all-clips.zip"
-    with zipfile.ZipFile(bundle, "w", zipfile.ZIP_DEFLATED) as zf:
+    staging = bundle.with_suffix(f".{uuid.uuid4().hex[:8]}.tmp")
+    with zipfile.ZipFile(staging, "w", zipfile.ZIP_DEFLATED) as zf:
         for clip in ready:
             base = f"{clip.index:02d}-{_safe_slug(clip.title, f'clip-{clip.index}')}"
             for suffix, ext in ((".mp4", "mp4"), (".srt", "srt")):
@@ -201,6 +232,7 @@ def download_all(job_id: str) -> FileResponse:
         )
         zf.writestr("clip-notes.txt", notes)
 
+    staging.replace(bundle)
     return FileResponse(bundle, media_type="application/zip",
                         filename=f"{_safe_slug(job.filename, 'podcast')}-clips.zip")
 
