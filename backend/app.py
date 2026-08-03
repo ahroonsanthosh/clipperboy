@@ -73,6 +73,7 @@ def create_job(
     aspect: str = Form(config.DEFAULT_ASPECT),
     clip_count: int = Form(config.DEFAULT_CLIP_COUNT),
     compress: str = Form("auto"),
+    captions: bool = Form(True),
 ) -> JSONResponse:
     if aspect not in config.ASPECTS:
         raise HTTPException(400, f"Unsupported aspect ratio. Choose one of {list(config.ASPECTS)}.")
@@ -88,7 +89,7 @@ def create_job(
             f"file such as .mp4, .mov, .mp3 or .m4a.",
         )
 
-    job = jobs.STORE.create(file.filename or "episode", aspect, clip_count)
+    job = jobs.STORE.create(file.filename or "episode", aspect, clip_count, captions)
     dest = config.UPLOAD_DIR / f"{job.id}{suffix}"
     try:
         with dest.open("wb") as out:
@@ -195,7 +196,7 @@ def rerender(job_id: str, clip_id: str, payload: dict) -> dict:
     if aspect not in config.ASPECTS:
         raise HTTPException(400, "Unsupported aspect ratio")
     try:
-        jobs.rerender_clip(job, clip, aspect, bool(payload.get("captions", True)))
+        jobs.rerender_clip(job, clip, aspect, bool(payload.get("captions", clip.captions)))
     except FileNotFoundError as exc:
         raise HTTPException(410, str(exc))
     except Exception:

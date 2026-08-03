@@ -196,3 +196,41 @@ def test_jobs_list_includes_created_jobs(finished_job):
     client, job = finished_job
     ids = [j["id"] for j in client.get("/api/jobs").json()["jobs"]]
     assert job["id"] in ids
+
+
+def test_captions_can_be_turned_off(client, video_fixture, tmp_path):
+    """With captions off, the picture must be clean — same clip, no burned text."""
+    import subprocess
+
+    import cv2
+    import numpy as np
+
+    from backend import config
+
+    def render_with(captions: str, name: str):
+        res = _upload(client, video_fixture, captions=captions, clip_count="1")
+        assert res.status_code == 201, res.text
+        job = client.get(f"/api/jobs/{res.json()['job']['id']}").json()["job"]
+        assert job["status"] == "done", job.get("error")
+        clip = job["clips"][0]
+        assert clip["status"] == "ready", clip.get("error")
+        assert clip["captions"] is (captions == "true")
+
+        png = tmp_path / f"{name}.png"
+        subprocess.run([
+            "ffmpeg", "-y", "-ss", "2",
+            "-i", str(config.CLIP_DIR / job["id"] / f"clip-{clip['id']}.mp4"),
+            "-frames:v", "1", str(png),
+        ], check=True, capture_output=True)
+        img = cv2.imread(str(png))
+        return job, clip, img[int(img.shape[0] * 0.7):int(img.shape[0] * 0.9), :, :].astype(float)
+
+    _, on_clip, with_caps = render_with("true", "on")
+    off_job, off_clip, without = render_with("false", "off")
+
+    assert float(np.mean(np.abs(with_caps - without))) > 1.0, \
+        "caption band is identical — the toggle had no effect"
+
+    # The sidecar subtitle file is still produced either way.
+    srt = client.get(f"/api/jobs/{off_job['id']}/clips/{off_clip['id']}/subtitles")
+    assert srt.status_code == 200 and "-->" in srt.text

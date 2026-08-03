@@ -125,6 +125,13 @@ body {
   background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
 }
 .option-hint { color: var(--text-dim); font-size: .8rem; margin: .35rem 0 0; }
+.option-label { display: block; font-weight: 600; margin-bottom: .35rem; }
+
+.checkbox {
+  display: flex; align-items: center; gap: .55rem; min-height: 44px;
+  font-weight: 400; cursor: pointer;
+}
+.checkbox input { width: 22px; height: 22px; min-height: 0; flex: none; accent-color: var(--accent); cursor: pointer; }
 
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: .45rem;

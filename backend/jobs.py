@@ -41,6 +41,7 @@ class Clip:
     features: dict
     transcript: str
     aspect: str
+    captions: bool = True
     crop_mode: str = ""
     faces_found: int = 0
     video: str = ""
@@ -68,6 +69,7 @@ class Job:
     working_size_mb: float = 0.0
     aspect: str = config.DEFAULT_ASPECT
     clip_count: int = config.DEFAULT_CLIP_COUNT
+    captions: bool = True
     clips: list[Clip] = field(default_factory=list)
     transcript_available: bool = False
 
@@ -129,13 +131,15 @@ class JobStore:
             pass
 
     # --- accessors -----------------------------------------------------
-    def create(self, filename: str, aspect: str, clip_count: int) -> Job:
+    def create(self, filename: str, aspect: str, clip_count: int,
+               captions: bool = True) -> Job:
         job = Job(
             id=uuid.uuid4().hex[:12],
             filename=filename,
             created_at=datetime.now(timezone.utc).isoformat(),
             aspect=aspect,
             clip_count=clip_count,
+            captions=captions,
         )
         with self._lock:
             self._jobs[job.id] = job
@@ -265,6 +269,7 @@ def process(job_id: str, source_path: Path, compress_mode: str) -> None:
                 start=round(c.start, 2), end=round(c.end, 2), duration=round(c.duration, 2),
                 score=round(c.score, 2), reasons=c.reasons, keywords=c.keywords,
                 features=c.features, transcript=c.text, aspect=job.aspect,
+                captions=job.captions,
             )
             for i, c in enumerate(candidates)
         ]
@@ -286,6 +291,7 @@ def process(job_id: str, source_path: Path, compress_mode: str) -> None:
                     out_srt=clip_dir / f"clip-{clip.id}.srt",
                     work_dir=work,
                     title=clip.title,
+                    burn_captions=clip.captions,
                 )
                 clip.video = f"/api/jobs/{job.id}/clips/{clip.id}/video"
                 clip.thumbnail = f"/api/jobs/{job.id}/clips/{clip.id}/thumbnail"
@@ -366,6 +372,7 @@ def rerender_clip(job: Job, clip: Clip, aspect: str, burn_captions: bool = True)
             title=clip.title,
         )
         clip.aspect = aspect
+        clip.captions = burn_captions
         clip.crop_mode = result.crop_mode
         clip.faces_found = result.faces_found
         clip.status = "ready"

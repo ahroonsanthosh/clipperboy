@@ -16,6 +16,7 @@
     aspect: $("aspect"),
     clipCount: $("clip-count"),
     compress: $("compress"),
+    captions: $("captions"),
 
     progressSection: $("progress-section"),
     progressHeading: $("progress-heading"),
@@ -168,6 +169,7 @@
     body.append("aspect", el.aspect.value);
     body.append("clip_count", el.clipCount.value);
     body.append("compress", el.compress.value);
+    body.append("captions", el.captions.checked ? "true" : "false");
 
     try {
       const { job } = await api("/api/jobs", { method: "POST", body });
@@ -365,6 +367,7 @@
       `${Math.round(clip.duration)} seconds`,
       `at ${fmtTime(clip.start)} in the episode`,
       clip.aspect,
+      clip.captions ? "captions burned in" : "no burned-in captions",
       CROP_LABEL[clip.crop_mode] || "",
     ].filter(Boolean).forEach((bit) => {
       const span = document.createElement("span");
@@ -513,7 +516,7 @@
       await api(`/api/jobs/${job.id}/clips/${clip.id}/render`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ aspect, captions: true }),
+        body: JSON.stringify({ aspect, captions: clip.captions }),
       });
       lastSignature = "";
       const { job: fresh } = await api(`/api/jobs/${job.id}`);
