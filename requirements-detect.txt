@@ -1,0 +1,25 @@
+# Face detection: MediaPipe BlazeFace.
+#
+# INSTALL THIS FILE WITH --no-deps. That is not a shortcut, it is the point:
+#
+#   pip install --no-deps -r requirements-detect.txt
+#
+# mediapipe *declares* jax, jaxlib, matplotlib, sounddevice and
+# opencv-contrib-python, because one wheel serves every MediaPipe solution.
+# Face detection imports none of them. A plain `pip install mediapipe` drags in
+# all five plus a numpy 2.x upgrade — and opencv-contrib-python overwrites the
+# `cv2` module that opencv-python-headless installed, swapping this app's
+# headless build for a GUI one that needs an X display. That breaks OpenCV
+# outright on a server or in Docker. Installing 66 MB with --no-deps avoids the
+# whole problem, so the four libraries mediapipe genuinely does import at
+# runtime are listed here explicitly and pinned alongside it.
+#
+# If this install fails (no wheel for your Python version, no network), the app
+# still runs: it falls back to OpenCV's Haar cascades, which frame less
+# accurately but need nothing extra. The run scripts treat it as optional.
+
+absl-py==2.1.0
+attrs==24.2.0
+flatbuffers==24.3.25
+protobuf==4.25.5
+mediapipe==0.10.14

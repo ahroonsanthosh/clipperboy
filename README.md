@@ -23,7 +23,7 @@ limits, nothing sent to a third party. Every component is free and open source.
    intros and outros are actively penalised.
 5. **Edits each clip**: crops to **9:16** with the camera *locked* on the
    speaker — still within a shot, hard-cutting when the speaker changes, never
-   drifting — using an adaptive ensemble of face detectors, and burns in **word-by-word captions** — kept inside the safe area
+   drifting — using MediaPipe's BlazeFace detector, and burns in **word-by-word captions** — kept inside the safe area
    so TikTok and Reels chrome never covers them. Audio-only episodes get an
    animated audiogram card with the clip title instead.
 6. **Shows you everything**: title, summary, why it was picked, topics, exact
@@ -174,6 +174,45 @@ sudo apt install espeak-ng                 # macOS: brew install espeak-ng
 ./.venv/bin/python -m pytest tests -q      # ~6 minutes; it renders real video
 ```
 
+### The face detector, and why it installs oddly
+
+`run.sh`, `run.bat` and the Dockerfile all install the detector as a second,
+separate step:
+
+```bash
+pip install --no-deps -r requirements-detect.txt
+```
+
+The `--no-deps` is load-bearing. MediaPipe ships one wheel for all of its
+solutions, so it *declares* jax, jaxlib, matplotlib, sounddevice and
+opencv-contrib-python even though face detection imports none of them. Letting
+pip resolve that installs opencv-contrib-python, which overwrites the `cv2`
+module provided by opencv-python-headless with a GUI build that needs an X
+display — breaking OpenCV on any server or container. Installing with
+`--no-deps` (66 MB, plus four small libraries pinned in the same file) avoids
+this entirely. **Do not add `mediapipe` to `requirements.txt`.**
+
+The detector is optional. If no wheel exists for your Python (it covers 3.9-3.12
+on Windows, macOS and Linux) or the install fails for any other reason, the app
+still runs: it logs one line and falls back to OpenCV's bundled Haar cascades,
+which frame noticeably less well. Both detectors are fully offline — BlazeFace's
+weights are inside the wheel, so nothing is ever downloaded.
+
+Measured on a real single-speaker podcast clip (52 samples, 1080x1920):
+
+| detector | finds the face | wrong boxes | ms/frame | crop planning, 40s clip |
+|---|---|---|---|---|
+| BlazeFace (default) | 98% | 0 | 8 | 0.6s |
+| Haar cascades (fallback) | 20% | 0 | 155 | 12.4s |
+| Haar, before this change | 40% | 53% | 98 | 7.8s |
+
+The old ladder's "wrong boxes" were not noise: it locked onto a sponsor sign on
+the wall behind the speaker, which is why crops used to land on blank wall. Its
+median horizontal error was 273px on a 1080px-wide frame. The fallback now
+applies a skin-colour test to every cascade box, which trades recall for
+precision — the right trade here, because the camera is locked, so a *missing*
+detection simply holds the shot while a *wrong* one moves the camera to the wall.
+
 The suite generates its own synthetic podcast fixture with espeak-ng + FFmpeg
 (`tests/make_fixture.py`) and stubs the speech model, so it runs offline and
 needs no copyrighted media. It covers probing, compression decisions, scoring,
@@ -191,7 +230,7 @@ backend/
     media.py          ffprobe/ffmpeg, compression, audio envelope
     transcribe.py     faster-whisper wrapper
     score.py          clip-worthiness scoring & selection
-    speaker.py        face-tracked crop planning
+    speaker.py        face detection + locked-camera crop planning
     captions.py       ASS (burned-in) + SRT generation
     render.py         final clip render
 frontend/             plain HTML/CSS/JS, no build step
@@ -203,5 +242,5 @@ tests/
 
 MIT. Built on [FFmpeg](https://ffmpeg.org),
 [faster-whisper](https://github.com/SYSTRAN/faster-whisper),
-[OpenCV](https://opencv.org) and [FastAPI](https://fastapi.tiangolo.com) — all free
-and open source.
+[OpenCV](https://opencv.org), [MediaPipe](https://github.com/google-ai-edge/mediapipe)
+and [FastAPI](https://fastapi.tiangolo.com) — all free and open source.

@@ -26,12 +26,24 @@ if not exist .venv (
   python -m venv .venv
 )
 
-if not exist .venv\.installed (
+if not exist .venv\.installed-v2 (
   echo Installing dependencies ^(a few minutes, first run only^)...
   .venv\Scripts\python -m pip install --quiet --upgrade pip
   .venv\Scripts\pip install --quiet -r requirements.txt
   if errorlevel 1 exit /b 1
-  echo done > .venv\.installed
+
+  REM The face detector installs separately and with --no-deps ON PURPOSE:
+  REM mediapipe declares opencv-contrib-python, which would replace the
+  REM headless OpenCV installed above with a GUI build. See
+  REM requirements-detect.txt. It is also optional -- without it the app falls
+  REM back to OpenCV's Haar cascades, so a failure here must not stop startup.
+  .venv\Scripts\pip install --quiet --no-deps -r requirements-detect.txt
+  if errorlevel 1 (
+    echo Warning: could not install the face detector ^(mediapipe^).
+    echo Clipperboy will still run, but vertical crops will be framed less
+    echo accurately. Python 3.10-3.12 is needed for the better detector.
+  )
+  echo done > .venv\.installed-v2
 )
 
 echo.

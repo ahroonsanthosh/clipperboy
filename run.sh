@@ -27,7 +27,7 @@ fi
 export HF_HOME="${HF_HOME:-$PWD/data/models}"
 
 # Re-install whenever requirements.txt changes, and never skip a failed install.
-WANT="$( (command -v shasum >/dev/null && shasum requirements.txt || sha256sum requirements.txt) | cut -d' ' -f1)"
+WANT="$( (command -v shasum >/dev/null && shasum requirements.txt requirements-detect.txt || sha256sum requirements.txt requirements-detect.txt) | cut -d' ' -f1 | tr -d '\n')"
 HAVE="$(cat "$STAMP" 2>/dev/null || true)"
 
 if [ ! -d .venv ]; then
@@ -39,6 +39,19 @@ if [ "$WANT" != "$HAVE" ]; then
   echo "→ Installing dependencies (a few minutes, first run only)…"
   ./.venv/bin/pip install --quiet --upgrade pip
   ./.venv/bin/pip install --quiet -r requirements.txt
+
+  # The face detector is installed separately and with --no-deps ON PURPOSE:
+  # mediapipe declares opencv-contrib-python, which would replace the headless
+  # OpenCV installed above with a GUI build. See requirements-detect.txt.
+  #
+  # It is also optional. If there is no mediapipe wheel for this Python, the
+  # app still runs on OpenCV's Haar cascades — worse framing, but working — so
+  # a failure here must not stop startup.
+  if ! ./.venv/bin/pip install --quiet --no-deps -r requirements-detect.txt; then
+    echo "⚠ Could not install the face detector (mediapipe)."
+    echo "  Clipperboy will still run, but vertical crops will be framed less"
+    echo "  accurately. Python 3.10-3.12 is needed for the better detector."
+  fi
   echo "$WANT" > "$STAMP"
 fi
 

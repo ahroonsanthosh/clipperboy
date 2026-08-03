@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -452,11 +453,26 @@ def test_face_sampling_walks_the_clip_once(video_fixture, monkeypatch):
     assert max(times) <= 20.5
 
 
-def test_detection_reports_centres_in_source_pixels(video_fixture, monkeypatch):
-    """Detection runs on a 640px copy; the returned centre must be scaled back."""
+def _skin_frame(box=(100, 50, 60, 60), size=(1080, 1920)):
+    """A source frame that is blank except for a skin-toned patch at `box`.
+
+    `box` is in 640px-wide detection coordinates, which is where the cascades
+    report. The patch is BGR (90, 130, 190) — a mid-brown that sits inside the
+    YCrCb skin locus — so a box drawn around it survives the colour test.
+    """
     import numpy as np
 
-    frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    frame = np.zeros((*size, 3), dtype=np.uint8)
+    scale = size[1] / speaker.DETECT_WIDTH
+    x, y, w, h = (int(v * scale) for v in box)
+    frame[y:y + h, x:x + w] = (90, 130, 190)
+    return frame
+
+
+def test_detection_reports_centres_in_source_pixels(monkeypatch):
+    """The Haar fallback detects on a 640px copy; centres must be scaled back."""
+    import numpy as np
+
     seen = {}
 
     def fake_run(name, gray, flip):
@@ -464,11 +480,118 @@ def test_detection_reports_centres_in_source_pixels(video_fixture, monkeypatch):
         seen["name"] = name
         return np.array([[100, 50, 60, 60]])      # a face at x=100 on the small frame
 
+    # BlazeFace is the primary detector and would answer first (with nothing, on
+    # a synthetic frame), so this pins the fallback specifically.
+    monkeypatch.setattr(speaker, "_mediapipe", lambda: None)
     monkeypatch.setattr(speaker, "_run_cascade", fake_run)
-    centre = speaker._detect_centre(frame)
+    centre = speaker._detect_centre(_skin_frame())
 
     assert seen["width"] == speaker.DETECT_WIDTH
     assert centre == pytest.approx((100 + 30) * (1920 / 640))
+
+
+def test_haar_fallback_rejects_boxes_with_no_skin_in_them(monkeypatch):
+    """The wall-sign false positives are what made real clips crop onto wall.
+
+    On the reference podcast clip the cascades fired on 83% of samples and every
+    box was the sponsor sign behind the speaker, never the speaker. The colour
+    test is what removes them, so a box over blank background must find nothing.
+    """
+    import numpy as np
+
+    monkeypatch.setattr(speaker, "_mediapipe", lambda: None)
+    # Only the *face* cascades answer. The upper-body cascade is deliberately
+    # exempt from the colour test (a torso is clothing, not skin), so letting it
+    # fire here would test nothing.
+    monkeypatch.setattr(
+        speaker, "_run_cascade",
+        lambda name, gray, flip: (np.empty((0, 4), int) if name == "upperbody"
+                                  else np.array([[100, 50, 60, 60]])))
+
+    # Same box, same cascade output — only the pixels underneath differ.
+    assert speaker._detect_centre(_skin_frame()) is not None
+    assert speaker._detect_centre(np.zeros((1080, 1920, 3), np.uint8)) is None
+
+
+def test_blazeface_boxes_are_scaled_back_to_source_pixels(monkeypatch):
+    """BlazeFace reports relative coordinates on the same 640px copy."""
+    import numpy as np
+
+    class _Box:
+        xmin, ymin, width, height = 0.25, 0.10, 0.10, 0.20
+
+    class _Det:
+        score = [0.9]
+        location_data = type("L", (), {"relative_bounding_box": _Box()})()
+
+    class _FakeGraph:
+        def process(self, rgb):
+            assert rgb.shape[1] == speaker.DETECT_WIDTH, "must run on the small copy"
+            return type("R", (), {"detections": [_Det()]})()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(speaker, "_mediapipe",
+                        lambda: type("M", (), {"FaceDetection": lambda **kw: _FakeGraph()}))
+    centre = speaker._detect_centre(np.zeros((1080, 1920, 3), np.uint8))
+
+    scale = 1920 / speaker.DETECT_WIDTH
+    expected = (0.25 + 0.10 / 2) * speaker.DETECT_WIDTH * scale
+    assert centre == pytest.approx(expected, abs=scale)
+
+
+def test_low_confidence_blazeface_detections_are_discarded(monkeypatch):
+    """A locked camera should not be pointed on the strength of a maybe."""
+    import numpy as np
+
+    class _Box:
+        xmin, ymin, width, height = 0.25, 0.10, 0.10, 0.20
+
+    def graph_scoring(score):
+        det = type("D", (), {
+            "score": [score],
+            "location_data": type("L", (), {"relative_bounding_box": _Box()})(),
+        })()
+        return type("G", (), {
+            "process": lambda self, rgb: type("R", (), {"detections": [det]})(),
+            "close": lambda self: None,
+        })()
+
+    frame = np.zeros((1080, 1920, 3), np.uint8)
+    for score, expected in ((0.95, True), (speaker.FACE_MIN_CONF - 0.05, False)):
+        monkeypatch.setattr(
+            speaker, "_mediapipe",
+            lambda s=score: type("M", (), {"FaceDetection": lambda **kw: graph_scoring(s)}))
+        # With mediapipe declining, the (unmocked) cascades see a blank frame.
+        assert (speaker._detect_centre(frame) is not None) is expected
+
+
+def test_a_broken_mediapipe_never_fails_a_job(monkeypatch, caplog):
+    """A detector import error is a downgrade to Haar, not an error."""
+    import numpy as np
+
+    monkeypatch.setattr(speaker, "_mp_face_detection", None)
+    monkeypatch.setattr(
+        speaker, "_run_cascade",
+        lambda name, gray, flip: np.array([[100, 50, 60, 60]]))
+
+    # Simulate mediapipe not being installed. Every cached `mediapipe.*` entry
+    # has to go: a `from mediapipe.python.solutions import ...` is served
+    # straight out of sys.modules under its full dotted name, so stubbing only
+    # the top-level package would leave the import quietly succeeding.
+    for name in [n for n in sys.modules if n == "mediapipe"
+                 or n.startswith("mediapipe.")]:
+        monkeypatch.delitem(sys.modules, name)
+    monkeypatch.setitem(sys.modules, "mediapipe", None)   # force the import to fail
+
+    with caplog.at_level("WARNING"):
+        centre = speaker._detect_centre(_skin_frame())
+
+    assert centre == pytest.approx((100 + 30) * (1920 / 640)), \
+        "the Haar fallback must still produce a framing decision"
+    assert any("Haar" in r.getMessage() for r in caplog.records), \
+        "the downgrade must be logged once"
 
 
 def test_detector_learns_which_cascade_suits_the_footage(monkeypatch):

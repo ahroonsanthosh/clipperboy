@@ -1,11 +1,23 @@
 """Keep the speaker in frame when cropping wide video to vertical.
 
-The camera is *locked*, not tracked. We sample the clip once, find every face
-with OpenCV's bundled Haar cascade (no model download, no network), cluster the
-face positions into a small set of stable "subject positions", then decide which
-subject is active over time and emit a piecewise-CONSTANT camera path: the frame
-sits perfectly still on one subject and hard-cuts to another, like a human editor
-switching cameras. It never glides.
+The camera is *locked*, not tracked. We sample the clip once, find every face,
+cluster the face positions into a small set of stable "subject positions", then
+decide which subject is active over time and emit a piecewise-CONSTANT camera
+path: the frame sits perfectly still on one subject and hard-cuts to another,
+like a human editor switching cameras. It never glides.
+
+Faces come from MediaPipe's BlazeFace ("full-range" variant), a small CNN whose
+weights ship inside the mediapipe wheel — no download, no network. It replaced a
+ladder of OpenCV Haar cascades, which on real footage were not merely imprecise
+but actively wrong: measured on a podcast clip, the ladder fired on 83% of
+samples yet *every one of those boxes was the sponsor sign on the wall behind
+the speaker*, never the speaker. That is what made real clips crop onto blank
+wall. BlazeFace finds the actual face in 87% of the same samples with no false
+positives at all, and does it in a twelfth of the time.
+
+The Haar ladder survives as a fallback for installs where mediapipe is missing
+or fails to load, so a detector problem can never fail a job — but it is now
+gated on a skin-colour test, which is what removes the wall-sign detections.
 
 Active-speaker selection is a HEURISTIC, not verified audio-visual ASD. It
 combines (a) speech gating from the word-level transcript, when one is supplied,
@@ -19,12 +31,20 @@ subject, which is still strictly better than drifting.
 """
 from __future__ import annotations
 
+import importlib.util
+import logging
+import os
+import sys
+import types
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
 import cv2
 import numpy as np
+
+log = logging.getLogger(__name__)
 
 SAMPLE_HZ = 2.0          # face lookups per second of clip
 
@@ -89,10 +109,98 @@ class Face:
     w: float
     h: float
     lip: float = 0.0     # lip-motion energy, 0 when unmeasurable
+    conf: float = 1.0    # detector confidence, 0-1 (Haar has none, so 1.0)
 
     @property
     def area(self) -> float:
         return self.w * self.h
+
+    @property
+    def weight(self) -> float:
+        """How much this detection should count when choosing the subject.
+
+        A 0.95-confidence face is worth roughly twice a 0.5 one. Confidences are
+        rescaled from the acceptance floor rather than used raw, so the weakest
+        detection we are willing to keep still carries a little weight instead of
+        an arbitrary 0.4.
+        """
+        span = max(1e-6, 1.0 - BLAZEFACE_MIN_CONF)
+        return 0.35 + 0.65 * float(np.clip((self.conf - BLAZEFACE_MIN_CONF) / span, 0.0, 1.0))
+
+
+# --- BlazeFace (primary) --------------------------------------------------
+# `model_selection=1` is the full-range model. The short-range one assumes a
+# selfie-distance face filling much of the frame; a podcast guest sitting back
+# from the camera is well outside its range.
+BLAZEFACE_MODEL = 1
+BLAZEFACE_MIN_CONF = 0.35   # the detector's own floor: below this it says nothing
+FACE_MIN_CONF = 0.45        # ...and below this we decline to plan a camera on it
+# Haar reports no score. Treat its boxes as mid-confidence: better than a
+# barely-passing BlazeFace hit, worse than a confident one — which is about
+# right for a detector that needs a colour test to be trusted at all.
+HAAR_CONF = 0.7
+
+_mp_face_detection = None   # None = not tried yet, False = unavailable
+
+
+@contextmanager
+def _without_matplotlib():
+    """Let `mediapipe.python.solutions` import without matplotlib installed.
+
+    `face_detection.py` needs numpy, protobuf and mediapipe's own framework —
+    nothing else. But importing it runs the `solutions/__init__.py` aggregator,
+    which pulls in every solution including `drawing_utils`, whose sole use of
+    matplotlib is a 3-D landmark plotting helper we never call. Honouring that
+    import would mean shipping matplotlib and its nine import-time dependencies
+    (~60MB, pillow included) to draw nothing.
+
+    So when matplotlib genuinely is not installed, a placeholder stands in for
+    the duration of the import and is removed immediately afterwards, leaving
+    sys.modules exactly as it was found. If matplotlib *is* installed, this does
+    nothing at all and the real one is used.
+    """
+    if importlib.util.find_spec("matplotlib") is not None:
+        yield
+        return
+    stub = types.ModuleType("matplotlib")
+    pyplot = types.ModuleType("matplotlib.pyplot")
+    stub.pyplot = pyplot
+    added = {"matplotlib": stub, "matplotlib.pyplot": pyplot}
+    sys.modules.update(added)
+    try:
+        yield
+    finally:
+        for name in added:
+            if sys.modules.get(name) in added.values():
+                del sys.modules[name]
+
+
+def _mediapipe():
+    """Import mediapipe once, tolerating every way it can fail to be there.
+
+    A missing or broken detector must never fail a job — the Haar ladder below
+    still works, so an ImportError here is a downgrade, not an error.
+    """
+    global _mp_face_detection, _mp_logged
+    if _mp_face_detection is None:
+        # mediapipe's absl/TF-Lite chatter goes to stderr at import and at every
+        # graph construction; it is noise in a user-facing terminal.
+        os.environ.setdefault("GLOG_minloglevel", "2")
+        os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+        try:
+            with _without_matplotlib():
+                from mediapipe.python.solutions import face_detection
+            _mp_face_detection = face_detection
+            log.info("Face detection: MediaPipe BlazeFace (full-range).")
+        except Exception as exc:                      # noqa: BLE001 — any failure
+            _mp_face_detection = False
+            log.warning(
+                "Face detection: MediaPipe unavailable (%s: %s); "
+                "falling back to OpenCV Haar cascades, which frame less "
+                "accurately. Reinstall with: pip install --no-deps -r "
+                "requirements-detect.txt", type(exc).__name__, exc)
+        _mp_logged = True
+    return _mp_face_detection or None
 
 
 _cascades: dict[str, cv2.CascadeClassifier] = {}
@@ -130,8 +238,15 @@ FACE_LADDER = (
 BODY_LADDER = (("upperbody", True), ("upperbody", False))
 
 
-def _small_gray(frame: np.ndarray) -> tuple[np.ndarray, float]:
-    """Downscale to DETECT_WIDTH and convert to gray. Returns (gray, scale)."""
+def _small(frame: np.ndarray) -> tuple[np.ndarray, float]:
+    """Downscale to DETECT_WIDTH, keeping colour. Returns (bgr, scale).
+
+    BlazeFace runs on this same small copy rather than the full frame. Measured
+    on the reference clip, 640px-wide input was both faster (6.1 vs 7.6 ms a
+    frame) and marginally *more* accurate (88% vs 87% recall, identical boxes to
+    within a pixel) — the network resizes its input to 192x192 internally
+    anyway, so handing it 1080p only pays for a bigger resize inside the graph.
+    """
     scale = 1.0
     if frame.shape[1] > DETECT_WIDTH:
         scale = frame.shape[1] / DETECT_WIDTH
@@ -139,7 +254,70 @@ def _small_gray(frame: np.ndarray) -> tuple[np.ndarray, float]:
             frame, (DETECT_WIDTH, int(round(frame.shape[0] / scale))),
             interpolation=cv2.INTER_LINEAR,
         )
-    return cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), scale
+    return frame, scale
+
+
+def _small_gray(frame: np.ndarray) -> tuple[np.ndarray, float]:
+    """Downscale to DETECT_WIDTH and convert to gray. Returns (gray, scale)."""
+    small, scale = _small(frame)
+    return cv2.cvtColor(small, cv2.COLOR_BGR2GRAY), scale
+
+
+# --- Haar false-positive rejection ----------------------------------------
+# The wall sign that the ladder kept detecting is printed text: bright, flat and
+# almost perfectly desaturated. A face is not. Requiring a usable share of
+# skin-toned pixels inside the box is the cheapest discriminator that separates
+# them (~0.2ms a box) and it does not depend on the box being static, so it also
+# rejects posters, mic flags and monitors that happen to move with the camera.
+SKIN_MIN_FRAC = 0.40     # share of the box's pixels that must be skin-toned
+SKIN_MIN_LUMA = 50       # ...and skin is never near-black (that is the mic)
+SKIN_MAX_LUMA = 250      # ...nor blown-out white (that is the sign)
+SKIN_MIN_SAT = 40
+
+
+def _skin_fraction(bgr: np.ndarray) -> float:
+    """Fraction of pixels in a BGR patch that fall in the YCrCb skin locus.
+
+    The Cr/Cb bounds are the long-standing Chai & Ngan values, which cover the
+    full range of human skin tones — the chrominance of skin is remarkably
+    consistent across complexions; it is luma that varies. Saturation and luma
+    floors are added on top because printed greys can drift into the Cr/Cb box
+    while being visibly colourless, and because chroma is meaningless in the
+    near-black pixels of a microphone.
+
+    Measured on the reference clip: real face boxes score 0.61-0.78 under these
+    bounds, the sponsor sign and the microphone both score 0.00.
+    """
+    if bgr.size == 0 or bgr.ndim != 3:
+        return 0.0
+    ycrcb = cv2.cvtColor(bgr, cv2.COLOR_BGR2YCrCb)
+    luma, cr, cb = ycrcb[:, :, 0], ycrcb[:, :, 1], ycrcb[:, :, 2]
+    sat = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)[:, :, 1]
+    mask = ((cr >= 133) & (cr <= 180) & (cb >= 77) & (cb <= 127)
+            & (sat >= SKIN_MIN_SAT)
+            & (luma >= SKIN_MIN_LUMA) & (luma <= SKIN_MAX_LUMA))
+    return float(np.count_nonzero(mask)) / float(mask.size)
+
+
+def _plausible_face(box: Sequence[int], colour: np.ndarray | None) -> bool:
+    """Does this Haar box contain enough skin to be a face at all?
+
+    Applied only when a colour frame is available. Without one (the unit tests
+    drive the cascades on synthetic grayscale) every box is accepted, so the
+    cascade contract is unchanged.
+    """
+    if colour is None:
+        return True
+    x, y, w, h = (int(v) for v in box)
+    # Sample the middle of the box: the border of a face box is hair and
+    # background, which would dilute the measurement either way.
+    x0, x1 = x + w // 4, x + w - w // 4
+    y0, y1 = y + h // 4, y + h - h // 4
+    x0, y0 = max(0, x0), max(0, y0)
+    x1, y1 = min(colour.shape[1], x1), min(colour.shape[0], y1)
+    if x1 - x0 < 2 or y1 - y0 < 2:
+        return False
+    return _skin_fraction(colour[y0:y1, x0:x1]) >= SKIN_MIN_FRAC
 
 
 def _run_cascade(name: str, gray: np.ndarray, flip: bool) -> np.ndarray:
@@ -159,47 +337,157 @@ def _run_cascade(name: str, gray: np.ndarray, flip: bool) -> np.ndarray:
 
 
 class _Detector:
-    """Finds people, cheaply, by learning which cascade suits this footage.
+    """Finds people in one clip's worth of samples.
 
-    A full ladder pass costs ~230ms a frame, which is far too slow to run on
-    every sample. So the first few samples pay for the search, the winner is
-    remembered, and later samples try it alone — 1.19 cascade calls per frame
-    measured, 102ms. When the favourite misses, exactly one alternate is tried
-    and then the frame is simply left empty: the camera is locked anyway, so a
-    missed sample holds position rather than moving, which is the right answer.
+    BlazeFace first: one CNN pass, ~6ms on the 640px copy, and its boxes are
+    trustworthy enough to use directly. Only when mediapipe is absent (or a
+    frame genuinely has no face in it) does the Haar ladder run.
+
+    The Haar path keeps its original design, which exists because a full ladder
+    pass costs ~230ms: the first few samples pay for the search, the winning
+    cascade is remembered, and later samples try it alone. When the favourite
+    misses, exactly one alternate is tried and then the frame is left empty —
+    the camera is locked anyway, so a missed sample holds position rather than
+    moving, which is the right answer.
+
+    One instance per clip. That is also what makes it thread-safe: clips are
+    planned on a ThreadPoolExecutor and a MediaPipe graph must not be shared
+    across threads, so each detector builds its own (~2ms).
     """
 
     def __init__(self) -> None:
         self.preferred: tuple[str, bool] | None = None
         self.samples_seen = 0
+        self.confidences: list[float] = []   # per box from the last detect()
+        self._preferred_body: tuple[str, bool] | None = None
+        self._blaze = None
+        module = _mediapipe()
+        if module is not None:
+            try:
+                self._blaze = module.FaceDetection(
+                    model_selection=BLAZEFACE_MODEL,
+                    min_detection_confidence=BLAZEFACE_MIN_CONF)
+            except Exception as exc:          # noqa: BLE001 — never fail a job
+                log.warning("Face detection: BlazeFace failed to start (%s); "
+                            "using Haar cascades.", exc)
 
-    def detect(self, gray: np.ndarray) -> tuple[np.ndarray, bool]:
-        """Returns (boxes, is_face). Boxes are in small-frame pixels."""
+    def close(self) -> None:
+        if self._blaze is not None:
+            try:
+                self._blaze.close()
+            except Exception:                 # noqa: BLE001
+                pass
+            self._blaze = None
+
+    def _blazeface(self, colour: np.ndarray) -> np.ndarray:
+        """BlazeFace boxes in small-frame pixels; fills self.confidences."""
+        try:
+            result = self._blaze.process(cv2.cvtColor(colour, cv2.COLOR_BGR2RGB))
+        except Exception as exc:              # noqa: BLE001 — never fail a job
+            log.warning("Face detection: BlazeFace errored (%s); "
+                        "using Haar cascades for the rest of this clip.", exc)
+            self.close()
+            return np.empty((0, 4), int)
+
+        h, w = colour.shape[:2]
+        boxes, scores = [], []
+        for det in (result.detections or ()):
+            score = float(det.score[0]) if det.score else 0.0
+            if score < FACE_MIN_CONF:
+                # Real, but not real enough to point a locked camera at.
+                continue
+            rel = det.location_data.relative_bounding_box
+            bw, bh = rel.width * w, rel.height * h
+            if bw < 8 or bh < 8:
+                continue
+            # BlazeFace can report boxes that run off the edge of the frame.
+            x0, y0 = max(0.0, rel.xmin * w), max(0.0, rel.ymin * h)
+            x1, y1 = min(float(w), rel.xmin * w + bw), min(float(h), rel.ymin * h + bh)
+            if x1 - x0 < 8 or y1 - y0 < 8:
+                continue
+            boxes.append([int(x0), int(y0), int(x1 - x0), int(y1 - y0)])
+            scores.append(score)
+        self.confidences = scores
+        return np.asarray(boxes, dtype=int).reshape(-1, 4)
+
+    def detect(self, gray: np.ndarray,
+               colour: np.ndarray | None = None) -> tuple[np.ndarray, bool]:
+        """Returns (boxes, is_face). Boxes are in small-frame pixels.
+
+        `colour` is the same frame before the gray conversion. BlazeFace needs
+        it, and the Haar path uses it to reject boxes with no skin in them.
+        Callers that only have grayscale still work — they simply get the Haar
+        ladder, unfiltered, exactly as before.
+        """
         self.samples_seen += 1
+        self.confidences = []
+
+        if self._blaze is not None and colour is not None:
+            boxes = self._blazeface(colour)
+            if len(boxes):
+                return boxes, True
+            if self._blaze is not None:
+                # BlazeFace ran and saw nothing. Trust it: the Haar ladder's
+                # answer on these frames was the wall, not a face.
+                return np.empty((0, 4), int), True
+
+        return self._haar(gray, colour)
+
+    def _haar(self, gray: np.ndarray,
+              colour: np.ndarray | None) -> tuple[np.ndarray, bool]:
+        def sift(boxes: np.ndarray) -> np.ndarray:
+            kept = [b for b in boxes if _plausible_face(b, colour)]
+            return np.asarray(kept, dtype=int).reshape(-1, 4)
+
+        def hit(boxes: np.ndarray, is_face: bool) -> tuple[np.ndarray, bool]:
+            self.confidences = [HAAR_CONF] * len(boxes)
+            return boxes, is_face
 
         if self.preferred is not None and self.samples_seen > PROBE_SAMPLES:
-            boxes = _run_cascade(*(self.preferred[0], gray, self.preferred[1]))
+            boxes = sift(_run_cascade(*(self.preferred[0], gray, self.preferred[1])))
             if len(boxes):
-                return boxes, True
+                return hit(boxes, True)
             alternate = next(s for s in FACE_LADDER if s != self.preferred)
-            boxes = _run_cascade(alternate[0], gray, alternate[1])
-            return (boxes, True) if len(boxes) else (np.empty((0, 4), int), True)
+            boxes = sift(_run_cascade(alternate[0], gray, alternate[1]))
+            return hit(boxes, True) if len(boxes) else (np.empty((0, 4), int), True)
+
+        # The skin test can reject everything the face ladder finds — that is
+        # the point — after which nothing is ever cached as `preferred` and
+        # every sample re-pays for the whole ladder plus the body pass. On the
+        # reference clip that took the fallback from 149ms to 412ms a frame. So
+        # the body cascade gets remembered too, and the exhaustive search gets
+        # a budget: once the probe samples have come up empty, this footage is
+        # simply one the cascades cannot read, and we stop rediscovering that.
+        if self.samples_seen > PROBE_SAMPLES:
+            if self._preferred_body is not None:
+                boxes = _run_cascade(*(self._preferred_body[0], gray,
+                                       self._preferred_body[1]))
+                if len(boxes):
+                    return hit(boxes, False)
+            return np.empty((0, 4), int), True
 
         for name, flip in FACE_LADDER:
-            boxes = _run_cascade(name, gray, flip)
+            boxes = sift(_run_cascade(name, gray, flip))
             if len(boxes):
                 self.preferred = (name, flip)
-                return boxes, True
+                return hit(boxes, True)
         for name, flip in BODY_LADDER:
+            # An upper-body box is mostly clothing, so the skin test does not
+            # apply to it; it is a last resort for horizontal position only.
             boxes = _run_cascade(name, gray, flip)
             if len(boxes):
-                return boxes, False
+                self._preferred_body = (name, flip)
+                return hit(boxes, False)
         return np.empty((0, 4), int), True
 
 
-def _detect_boxes(gray: np.ndarray) -> np.ndarray:
+def _detect_boxes(gray: np.ndarray, colour: np.ndarray | None = None) -> np.ndarray:
     """Single-shot detection for callers without their own detector state."""
-    boxes, _is_face = _Detector().detect(gray)
+    detector = _Detector()
+    try:
+        boxes, _is_face = detector.detect(gray, colour)
+    finally:
+        detector.close()
     return boxes
 
 
@@ -209,8 +497,9 @@ def _detect_centre(frame: np.ndarray) -> float | None:
     Retained for callers/tests that only want a single position; the planner
     itself keeps every face.
     """
-    gray, scale = _small_gray(frame)
-    boxes = _detect_boxes(gray)
+    colour, scale = _small(frame)
+    gray = cv2.cvtColor(colour, cv2.COLOR_BGR2GRAY)
+    boxes = _detect_boxes(gray, colour)
     if not len(boxes):
         return None
     x, _y, w, _h = max(boxes, key=lambda f: f[2] * f[3])
@@ -361,7 +650,7 @@ def _assign(samples: list[list[Face]],
         row: list[Face | None] = [None] * len(subjects)
         for f in faces:
             j = int(np.argmin([abs(f.cx - c) for c in subjects]))
-            if row[j] is None or f.area > row[j].area:
+            if row[j] is None or f.area * f.weight > row[j].area * row[j].weight:
                 row[j] = f
         out.append(row)
     return out
@@ -388,7 +677,10 @@ def _decide_path(times: list[float], samples: list[list[Face]],
             continue
         for j, f in enumerate(row):
             if f is not None:
-                evidence[i, j] = f.lip
+                # Scale the talking evidence by how sure we are this is even a
+                # face: a marginal detection should not be able to pull the
+                # camera off a confidently-detected subject.
+                evidence[i, j] = f.lip * f.weight
 
     # If lip motion carries no information at all, fall back to presence-weighted
     # prominence — which yields a single static shot rather than a moving one.
@@ -397,7 +689,7 @@ def _decide_path(times: list[float], samples: list[list[Face]],
         for row in rows:
             for j, f in enumerate(row):
                 if f is not None:
-                    prominence[j] += f.area
+                    prominence[j] += f.area * f.weight
         return [int(np.argmax(prominence))] * n
 
     dt = (times[-1] - times[0]) / max(1, n - 1) if n > 1 else 1.0 / SAMPLE_HZ
@@ -520,45 +812,51 @@ def _sample_faces(video: Path, start: float, duration: float
     times: list[float] = []
     samples: list[list[Face]] = []
     index = 0
-    while index <= wanted:
-        if not cap.grab():
-            break
-        if index % step == 0:
-            ok, frame = cap.retrieve()
-            times.append(index / fps)
-            if not ok or frame is None:
-                samples.append([])
-                index += 1
-                continue
-
-            gray, scale = _small_gray(frame)
-            boxes, is_face = detector.detect(gray)
-
-            later = None
-            if len(boxes):
-                for _ in range(lip_gap):
-                    if not cap.grab():
-                        break
+    try:
+        while index <= wanted:
+            if not cap.grab():
+                break
+            if index % step == 0:
+                ok, frame = cap.retrieve()
+                times.append(index / fps)
+                if not ok or frame is None:
+                    samples.append([])
                     index += 1
-                ok2, frame2 = cap.retrieve()
-                if ok2 and frame2 is not None:
-                    later, _ = _small_gray(frame2)
+                    continue
 
-            faces = []
-            for bx, by, bw, bh in boxes:
-                # An upper-body box is torso-shaped: its centre sits well below
-                # the head, and lip motion cannot be read from it. Take the
-                # horizontal position, which is what framing needs, and put the
-                # notional head in the upper third.
-                cy = float(by + bh / 2) if is_face else float(by + bh * 0.28)
-                faces.append(Face(
-                    cx=float(bx + bw / 2) * scale, cy=cy * scale,
-                    w=float(bw) * scale, h=float(bh) * scale,
-                    lip=_lip_energy(gray, later, (bx, by, bw, bh)) if is_face else 0.0,
-                ))
-            samples.append(faces)
-        index += 1
-    cap.release()
+                colour, scale = _small(frame)
+                gray = cv2.cvtColor(colour, cv2.COLOR_BGR2GRAY)
+                boxes, is_face = detector.detect(gray, colour)
+                scores = list(detector.confidences)
+
+                later = None
+                if len(boxes):
+                    for _ in range(lip_gap):
+                        if not cap.grab():
+                            break
+                        index += 1
+                    ok2, frame2 = cap.retrieve()
+                    if ok2 and frame2 is not None:
+                        later, _ = _small_gray(frame2)
+
+                faces = []
+                for i, (bx, by, bw, bh) in enumerate(boxes):
+                    # An upper-body box is torso-shaped: its centre sits well
+                    # below the head, and lip motion cannot be read from it. Take
+                    # the horizontal position, which is what framing needs, and
+                    # put the notional head in the upper third.
+                    cy = float(by + bh / 2) if is_face else float(by + bh * 0.28)
+                    faces.append(Face(
+                        cx=float(bx + bw / 2) * scale, cy=cy * scale,
+                        w=float(bw) * scale, h=float(bh) * scale,
+                        lip=_lip_energy(gray, later, (bx, by, bw, bh)) if is_face else 0.0,
+                        conf=float(scores[i]) if i < len(scores) else HAAR_CONF,
+                    ))
+                samples.append(faces)
+            index += 1
+    finally:
+        cap.release()
+        detector.close()
 
     if not times:
         return [0.0], [[]]

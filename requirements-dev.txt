@@ -1,2 +1,6 @@
 -r requirements.txt
+# NOTE: requirements-detect.txt is deliberately NOT included here — pip would
+# resolve its dependencies and pull in the opencv-contrib-python build that
+# shadows opencv-python-headless. Install it the way the run scripts do:
+#   pip install --no-deps -r requirements-detect.txt
 pytest==8.3.4
