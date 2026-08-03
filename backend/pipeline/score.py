@@ -51,7 +51,53 @@ STORY_WORDS = (
 DANGLING_STARTS = (
     "and", "but", "so", "because", "which", "that", "it", "he", "she", "they",
     "them", "this", "those", "also", "then", "or", "yeah", "yes", "no", "well",
+    "who", "whose", "however", "therefore", "anyway", "besides", "plus", "meaning",
+    "again", "ok", "okay", "alright", "right", "um", "uh", "erm", "though", "although",
+    "otherwise", "thus", "hence", "him", "her", "his", "its", "their", "these",
 )
+
+# Openings that explicitly point *backwards* at something the viewer never saw.
+BACKREF_STARTS = (
+    "as i was saying", "like i said", "like i mentioned", "as i mentioned",
+    "as we said", "going back to", "back to what", "to that point", "on that note",
+    "that's why", "that is why", "which is why", "which means", "so anyway",
+    "so yeah", "so that", "and then", "and so", "but the thing is", "in that case",
+    "the other one", "the second one", "the second thing", "the third thing",
+    "same thing", "exactly", "for that reason", "either way", "speaking of",
+)
+
+# Words a *closing* sentence must never end on — the thought clearly continues.
+DANGLING_ENDS = (
+    "and", "but", "or", "so", "because", "which", "that", "if", "when", "while",
+    "with", "to", "for", "of", "the", "a", "an", "my", "your", "his", "her", "their",
+    "our", "its", "is", "was", "are", "were", "than", "then", "as", "at", "in", "on",
+    "like", "plus", "however", "therefore", "about", "into", "from", "by", "not",
+    "very", "just", "really", "i", "we", "he", "she", "they", "it", "you", "there",
+    "how", "why", "what", "who", "some", "any", "one", "two", "three", "first",
+    "second", "third", "another", "also", "um", "uh", "erm",
+)
+
+# Phrases that announce more to come: a clip ending here is obviously truncated.
+DANGLING_END_PHRASES = (
+    "the second thing is", "the second thing", "the third thing", "the other thing is",
+    "the first thing is", "first of all", "for example", "such as", "one of the",
+    "number one", "number two", "the first is", "the second is", "which means",
+    "the reason is", "here's why", "here is why", "let me explain", "let me tell you",
+    "here's the thing", "here is the thing", "the point is", "and it goes like this",
+    "listen to this", "check this out", "watch this", "for instance", "like this",
+    "as follows", "the problem is", "the truth is", "here's what",
+)
+
+# A clip that ends on a direct question nobody answered feels cut off.
+_OPEN_QUESTION_STARTERS = (
+    "why", "how", "what", "when", "where", "who", "do", "did", "does", "is", "are",
+    "was", "were", "can", "could", "would", "should", "have", "has", "will", "am",
+)
+
+# Silence long enough to be believable evidence of a thought boundary, even when
+# Whisper's punctuation is missing or wrong.
+GAP_STRONG = 0.35      # seconds of silence that confirm a real boundary
+GAP_SNAP_MAX = 0.35    # never pad a clip by more than this on either side
 
 FILLER = ("um", "uh", "erm", "like", "you know", "i mean", "sort of", "kind of")
 
@@ -88,6 +134,9 @@ class Candidate:
     title: str = ""
     summary: str = ""
     keywords: list[str] = field(default_factory=list)
+    # Index range into the sentence list, so the final cut can be snapped into
+    # the surrounding silence without re-deriving it from timestamps.
+    sent_range: tuple[int, int] | None = None
 
     @property
     def duration(self) -> float:
@@ -131,6 +180,144 @@ def to_sentences(tr: Transcript) -> list[Sentence]:
     if buf_text and buf_start is not None:
         sentences.append(Sentence(buf_start, last_end, " ".join(buf_text).strip(), list(buf_words)))
     return [s for s in sentences if s.text]
+
+
+# --- boundary quality -----------------------------------------------------
+#
+# The user's rule: a clip must be a COMPLETE THOUGHT. So boundary quality is a
+# hard filter applied to the (i, j) index pair *before* any window is scored —
+# rejected windows cost a couple of array lookups instead of a full score pass.
+#
+# Every sentence gets two grades, computed once per episode in O(n):
+#
+#   2 = clean   — punctuation *and/or* a real silence gap agree this is a
+#                 genuine thought boundary
+#   1 = usable  — nothing says it's mid-sentence, but nothing confirms it either
+#                 (sloppy punctuation, no pause)
+#   0 = broken  — positively mid-thought: dangling word, back-reference,
+#                 trailing conjunction, unanswered question
+#
+# A candidate's tier is min(start_grade[i], end_grade[j]).
+
+TIER_CLEAN = 2
+TIER_USABLE = 1
+TIER_BROKEN = 0
+
+_BOUNDARY_QUALITY = {TIER_CLEAN: "clean", TIER_USABLE: "approximate", TIER_BROKEN: "forced"}
+
+_WORD_RE = re.compile(r"[a-z']+")
+
+
+def _first_token(text: str) -> str:
+    m = _WORD_RE.search(text.lower())
+    return m.group(0) if m else ""
+
+
+def _last_token(text: str) -> str:
+    toks = _WORD_RE.findall(text.lower())
+    return toks[-1] if toks else ""
+
+
+def _tail(text: str, words: int = 7) -> str:
+    """The last few words, lowercased — used for 'about to continue' phrases."""
+    return " ".join(text.lower().split()[-words:])
+
+
+def _starts_mid_thought(text: str) -> bool:
+    low = text.lower().lstrip("\"'([ ")
+    if _first_token(low) in DANGLING_STARTS:
+        return True
+    return any(low.startswith(p) for p in BACKREF_STARTS)
+
+
+def _ends_mid_thought(text: str) -> bool:
+    stripped = text.rstrip().rstrip("\"')]")
+    if _last_token(stripped) in DANGLING_ENDS:
+        return True
+    tail = _tail(stripped)
+    if any(tail.endswith(p) or tail.endswith(p + ",") for p in DANGLING_END_PHRASES):
+        return True
+    # An ellipsis or a trailing comma/semicolon is an explicit "more follows".
+    if stripped.endswith(("...", "…", ",", ";", ":", "-", "—")):
+        return True
+    # A direct question with no answer inside the clip.
+    if stripped.endswith("?"):
+        last_q = re.split(r"(?<=[.!?])\s+", stripped)[-1]
+        if _first_token(last_q) in _OPEN_QUESTION_STARTERS:
+            return True
+    return False
+
+
+def boundary_grades(sents: list[Sentence]) -> tuple[list[int], list[int]]:
+    """Per-sentence (start_grade, end_grade). O(n), computed once per episode."""
+    n = len(sents)
+    starts = [TIER_USABLE] * n
+    ends = [TIER_USABLE] * n
+    if n == 0:
+        return starts, ends
+
+    for i, s in enumerate(sents):
+        text = s.text.strip()
+
+        if _starts_mid_thought(text):
+            starts[i] = TIER_BROKEN
+        else:
+            gap_before = s.start - sents[i - 1].end if i else float("inf")
+            prev_closed = i == 0 or bool(_SENT_END.search(sents[i - 1].text))
+            # Punctuation OR silence is enough; Whisper rarely gets both wrong.
+            if prev_closed or gap_before >= GAP_STRONG:
+                starts[i] = TIER_CLEAN
+
+        if _ends_mid_thought(text):
+            ends[i] = TIER_BROKEN
+        else:
+            gap_after = sents[i + 1].start - s.end if i + 1 < n else float("inf")
+            if _SENT_END.search(text) or gap_after >= GAP_STRONG:
+                ends[i] = TIER_CLEAN
+
+    return starts, ends
+
+
+def silence_gaps(sents: list[Sentence]) -> tuple[list[float], list[float]]:
+    """Silence before / after each sentence, in seconds."""
+    n = len(sents)
+    before = [float("inf")] * n
+    after = [float("inf")] * n
+    for i in range(n):
+        if i:
+            before[i] = max(0.0, sents[i].start - sents[i - 1].end)
+        if i + 1 < n:
+            after[i] = max(0.0, sents[i + 1].start - sents[i].end)
+    return before, after
+
+
+def snap_to_silence(start: float, end: float, gap_before: float, gap_after: float,
+                    total_duration: float = 0.0,
+                    max_pad: float = GAP_SNAP_MAX) -> tuple[float, float]:
+    """Move the cut into the middle of the surrounding silence.
+
+    Cutting exactly on the first word clips the breath before it and lands on a
+    hard consonant; half a beat of room makes the clip sound intentional. Padding
+    is capped so the clip cannot outgrow MAX_CLIP_SEC.
+    """
+    pad_head = min(max_pad, gap_before / 2.0) if gap_before != float("inf") else max_pad
+    pad_tail = min(max_pad, gap_after / 2.0) if gap_after != float("inf") else max_pad
+    pad_head = max(0.0, pad_head)
+    pad_tail = max(0.0, pad_tail)
+
+    head_room = config.MAX_CLIP_SEC - (end - start)
+    if head_room <= 0:
+        return start, end
+    if pad_head + pad_tail > head_room:  # share what's left proportionally
+        total = pad_head + pad_tail
+        pad_head *= head_room / total
+        pad_tail *= head_room / total
+
+    new_start = max(0.0, start - pad_head)
+    new_end = end + pad_tail
+    if total_duration:
+        new_end = min(new_end, total_duration)
+    return new_start, max(new_start + 0.001, new_end)
 
 
 # --- feature helpers ------------------------------------------------------
@@ -181,7 +368,8 @@ def keywords_for(text: str, limit: int = 6) -> list[str]:
 # --- scoring --------------------------------------------------------------
 
 def score_window(sents: list[Sentence], env: np.ndarray, hz: int,
-                 total_duration: float, ref: float | None = None) -> Candidate:
+                 total_duration: float, ref: float | None = None,
+                 tier: int = TIER_CLEAN) -> Candidate:
     start, end = sents[0].start, sents[-1].end
     text = " ".join(s.text for s in sents).strip()
     low = text.lower()
@@ -263,6 +451,8 @@ def score_window(sents: list[Sentence], env: np.ndarray, hz: int,
         reasons.append("Starts and ends on complete thoughts")
     if ads:
         reasons.append("⚠ Looks like sponsor read")
+    if tier < TIER_CLEAN:
+        reasons.append("⚠ Boundaries are approximate — check the in/out points")
     if not reasons:
         reasons.append("Steady, quotable stretch of conversation")
 
@@ -274,33 +464,91 @@ def score_window(sents: list[Sentence], env: np.ndarray, hz: int,
             "loudness": round(loud_mean, 3), "energy_variation": round(loud_var, 3),
             "words_per_minute": round(wpm), "word_count": word_count,
             "self_contained": bool(opens_clean and closes_clean),
+            "boundary_tier": tier,
+            "boundary_quality": _BOUNDARY_QUALITY.get(tier, "approximate"),
+            "complete_thought": tier >= TIER_CLEAN,
         },
         keywords=keywords_for(text),
     )
 
 
-def build_candidates(sents: list[Sentence], env: np.ndarray, hz: int,
-                     total_duration: float, progress=None) -> list[Candidate]:
-    out: list[Candidate] = []
+def candidate_spans(sents: list[Sentence], tier: int) -> list[tuple[int, int, int]]:
+    """Sentence-index pairs whose boundary tier is >= `tier` and length is legal.
+
+    Deliberately does no scoring: rejecting a window here costs two list lookups,
+    where scoring it costs a full feature extraction. On a 60-minute episode the
+    strict pass throws away most (i, j) pairs before they are ever scored.
+    """
+    starts, ends = boundary_grades(sents)
     n = len(sents)
-    ref = loudness_reference(env)
+    spans: list[tuple[int, int, int]] = []
+    min_sec, max_sec = config.MIN_CLIP_SEC, config.MAX_CLIP_SEC
     for i in range(n):
-        if progress and n > 50 and i % 50 == 0:
-            progress(i / n, f"Scoring moments… {int(i / n * 100)}%")
+        sg = starts[i]
+        if sg < tier:
+            continue  # whole row is unusable — skip without touching durations
+        s_start = sents[i].start
         for j in range(i, n):
-            dur = sents[j].end - sents[i].start
-            if dur < config.MIN_CLIP_SEC:
+            dur = sents[j].end - s_start
+            if dur < min_sec:
                 continue
-            if dur > config.MAX_CLIP_SEC:
+            if dur > max_sec:
                 break
-            out.append(score_window(sents[i:j + 1], env, hz, total_duration, ref))
+            eg = ends[j]
+            if eg >= tier:
+                spans.append((i, j, sg if sg < eg else eg))
+    return spans
+
+
+def build_candidates(sents: list[Sentence], env: np.ndarray, hz: int,
+                     total_duration: float, progress=None,
+                     tier: int | None = None) -> list[Candidate]:
+    """Score every window that survives the boundary constraints.
+
+    With `tier=None` (the default) the strictest tier that still yields any
+    window wins: clean boundaries if the transcript has them, otherwise
+    "nothing says this is mid-sentence", otherwise — for a transcript with no
+    punctuation and no pauses at all — whatever exists. Callers that want to
+    top up a thin strict selection ask for a lower tier explicitly.
+    """
+    n = len(sents)
+    if n == 0:
+        return []
+
+    tiers = (tier,) if tier is not None else (TIER_CLEAN, TIER_USABLE, TIER_BROKEN)
+    spans: list[tuple[int, int, int]] = []
+    for t in tiers:
+        spans = candidate_spans(sents, t)
+        if spans:
+            break
+    if not spans:
+        return []
+
+    ref = loudness_reference(env)
+    out: list[Candidate] = []
+    total = len(spans)
+    step = max(1, total // 40)
+    for k, (i, j, t) in enumerate(spans):
+        if progress and total > 200 and k % step == 0:
+            progress(k / total, f"Scoring moments… {int(k / total * 100)}%")
+        cand = score_window(sents[i:j + 1], env, hz, total_duration, ref, t)
+        cand.sent_range = (i, j)
+        out.append(cand)
     return out
 
 
-def select(candidates: list[Candidate], count: int, min_gap: float = 5.0) -> list[Candidate]:
-    """Greedy non-overlapping selection, best score first."""
-    chosen: list[Candidate] = []
+def select(candidates: list[Candidate], count: int, min_gap: float = 5.0,
+           seed: list[Candidate] | None = None) -> list[Candidate]:
+    """Greedy non-overlapping selection, best score first.
+
+    `seed` is an already-chosen set (e.g. the strict-boundary picks) that new
+    candidates must not overlap — used to top up a thin strict selection with
+    lower-confidence clips without disturbing the good ones.
+    """
+    chosen: list[Candidate] = list(seed or [])
     for cand in sorted(candidates, key=lambda c: -c.score):
+        if any(cand is c for c in chosen):
+            continue
         if len(chosen) >= count:
             break
         if any(cand.start < c.end + min_gap and c.start < cand.end + min_gap for c in chosen):
@@ -392,14 +640,58 @@ def _ollama_enrich(cands: list[Candidate], progress=None) -> None:
                 c.summary = summary
 
 
+def apply_snapping(picked: list[Candidate], sents: list[Sentence],
+                   total_duration: float = 0.0, min_gap: float = 0.0) -> list[Candidate]:
+    """Move each chosen clip's in/out points into the surrounding silence."""
+    if not picked:
+        return picked
+    before, after = silence_gaps(sents)
+    picked = sorted(picked, key=lambda c: c.start)
+    for idx, c in enumerate(picked):
+        if c.sent_range is None:
+            continue
+        i, j = c.sent_range
+        if not (0 <= i < len(sents) and 0 <= j < len(sents)):
+            continue
+        start, end = snap_to_silence(c.start, c.end, before[i], after[j], total_duration)
+        # Never let padding eat into a neighbouring clip.
+        if idx and start < picked[idx - 1].end + min_gap:
+            start = c.start
+        if idx + 1 < len(picked) and end > picked[idx + 1].start - min_gap:
+            end = c.end
+        c.start, c.end = start, end
+    return picked
+
+
 def find_clips(tr: Transcript, env: np.ndarray, hz: int, count: int,
                progress=None, scan_progress=None) -> list[Candidate]:
     sents = to_sentences(tr)
     if not sents:
         return []
+
+    # Pass 1: only windows that begin and end on a genuine thought boundary.
     cands = build_candidates(sents, env, hz, tr.duration, progress=scan_progress)
-    if not cands:
-        # Podcast shorter than one minimum-length window: use the whole thing.
-        cands = [score_window(sents, env, hz, tr.duration)]
     picked = select(cands, count)
+
+    # Graceful degradation: a transcript with sloppy punctuation and no pauses
+    # can starve the strict pass. Rather than return two clips, top up from the
+    # next tier down — those arrive flagged (features["boundary_quality"]) so
+    # the UI can warn that the in/out points are approximate.
+    if len(picked) < count:
+        best_tier = min((c.features.get("boundary_tier", TIER_BROKEN) for c in cands),
+                        default=TIER_CLEAN)
+        for lower in (TIER_USABLE, TIER_BROKEN):
+            if len(picked) >= count or lower >= best_tier:
+                continue
+            relaxed = build_candidates(sents, env, hz, tr.duration, tier=lower)
+            picked = select(relaxed, count, seed=picked)
+
+    if not picked:
+        # Shorter than one minimum-length window: use the whole thing.
+        whole = score_window(sents, env, hz, tr.duration, tier=TIER_USABLE)
+        whole.sent_range = (0, len(sents) - 1)
+        picked = [whole]
+
+    picked = apply_snapping(picked, sents, tr.duration)
+    picked.sort(key=lambda c: c.start)
     return enrich(picked, progress)

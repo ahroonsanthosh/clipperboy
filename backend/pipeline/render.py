@@ -140,7 +140,10 @@ def render_clip(
     staging = out_video.with_name(out_video.name + ".part.mp4")
 
     if info.has_video:
-        plan = speaker.plan_crop(source, start, end, info.width, info.height, target_ratio)
+        # The clip's words tell the planner when anybody is speaking at all,
+        # which gates its lip-motion evidence and stops silence from voting.
+        plan = speaker.plan_crop(source, start, end, info.width, info.height,
+                                 target_ratio, words=clip_words)
         crop_mode, faces_found = plan.mode, plan.faces_found
 
         def build(active: speaker.CropPlan) -> list[str]:
