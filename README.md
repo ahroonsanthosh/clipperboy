@@ -131,7 +131,7 @@ Set these as environment variables (or in `docker-compose.yml`):
 | `CLIPPERBOY_WHISPER_MODEL` | `base` | `tiny`, `base`, `small`, `medium`, `large-v3`. Bigger = more accurate, slower. |
 | `CLIPPERBOY_CLIP_COUNT` | `8` | Default number of clips to find. |
 | `CLIPPERBOY_ASPECT` | `9:16` | Default aspect ratio. |
-| `CLIPPERBOY_MIN_CLIP` / `CLIPPERBOY_MAX_CLIP` | `18` / `75` | Clip length bounds, in seconds. |
+| `CLIPPERBOY_MIN_CLIP` / `CLIPPERBOY_MAX_CLIP` | `18` / `60` | Clip length bounds, in seconds. The maximum is a hard cap — the lead-in/out padding is trimmed rather than allowed to overshoot it. |
 | `CLIPPERBOY_WHISPER_BATCHED` | `1` | Batched transcription — much faster. `0` for the sequential path. |
 | `CLIPPERBOY_WHISPER_BATCH` | auto | Batch size, chosen from your RAM (2 under 6 GB, 4 under 12 GB, else 8). Raise it on a GPU; lower it if a long episode is being killed. |
 | `CLIPPERBOY_DATA` | `./data` | Where uploads, clips and models are stored. |

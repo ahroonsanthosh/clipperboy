@@ -446,7 +446,8 @@ def test_face_sampling_walks_the_clip_once(video_fixture, monkeypatch):
 
     assert len(seeks) <= 1
     assert len(times) == len(centres)
-    assert 15 <= len(times) <= 25          # ~1 sample/second over 20 seconds
+    expected = 20 * speaker.SAMPLE_HZ
+    assert expected * 0.75 <= len(times) <= expected * 1.3
     assert times == sorted(times)
     assert max(times) <= 20.5
 
@@ -502,10 +503,24 @@ def test_transcribe_falls_back_when_batching_is_unavailable(monkeypatch):
             pass
         transcribe = staticmethod(exploding)
 
-    monkeypatch.setattr(tr, "_load_model", lambda: FakeModel())
+    monkeypatch.setattr(tr, "_load_model", lambda *a, **k: FakeModel())
     import faster_whisper
     monkeypatch.setattr(faster_whisper, "BatchedInferencePipeline", FakePipeline)
 
     result = tr.transcribe(Path("ignored.wav"), 1.0)
     assert calls == ["sequential"]
     assert result.segments[0].text == "hello there."
+
+
+def test_no_clip_is_longer_than_the_limit(video_fixture, tmp_path, fake_transcript):
+    """The cap is a hard limit: the lead-in/out padding must not overshoot it."""
+    info = media.probe(video_fixture)
+    tr = fake_transcript(info.duration)
+    result = render.render_clip(
+        source=video_fixture, info=info,
+        start=2.0, end=2.0 + media.config.MAX_CLIP_SEC,     # already at the limit
+        words=tr.words, aspect="9:16",
+        out_video=tmp_path / "cap.mp4", out_thumb=tmp_path / "cap.jpg",
+        out_srt=tmp_path / "cap.srt", work_dir=tmp_path,
+    )
+    assert media.probe(result.video_path).duration <= media.config.MAX_CLIP_SEC + 0.15

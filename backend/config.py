@@ -33,7 +33,7 @@ USE_OLLAMA = os.environ.get("CLIPPERBOY_USE_OLLAMA", "auto")  # auto | on | off
 
 # Clip shape defaults
 MIN_CLIP_SEC = float(os.environ.get("CLIPPERBOY_MIN_CLIP", 18))
-MAX_CLIP_SEC = float(os.environ.get("CLIPPERBOY_MAX_CLIP", 75))
+MAX_CLIP_SEC = float(os.environ.get("CLIPPERBOY_MAX_CLIP", 60))
 DEFAULT_CLIP_COUNT = int(os.environ.get("CLIPPERBOY_CLIP_COUNT", 8))
 
 # Speech-to-text tuning. Batched inference is much faster and needs no extra

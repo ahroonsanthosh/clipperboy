@@ -110,6 +110,9 @@ def render_clip(
 
     start = max(0.0, start - PAD_BEFORE)
     end = min(info.duration, end + PAD_AFTER)
+    # The lead-in/out padding must not push a clip past the length limit — the
+    # cap is what the user asked for, not a target to overshoot.
+    end = min(end, start + config.MAX_CLIP_SEC)
     duration = max(0.5, end - start)
 
     clip_words = [w for w in words if w.end > start and w.start < end]
