@@ -25,6 +25,29 @@ UNSHARP = "unsharp=5:5:0.8:3:3:0.4"
 # picture, which is already sharpening it; unsharp on top only adds ringing.
 UNSHARP_MIN_SCALE = 1.05
 
+# Interlaced footage combs on every moving edge once it is scaled, and unsharp
+# then amplifies the comb. bwdif is the better of ffmpeg's two deinterlacers.
+DEINTERLACE = "bwdif=mode=send_frame:parity=auto:deint=interlaced"
+
+# An HDR source passed through untouched becomes a flat, dark SDR file, and
+# forcing 10-bit PQ into 8-bit while keeping the PQ tag is out of spec — players
+# either apply the PQ curve to SDR-ish values or ignore the tag entirely.
+TONEMAP = (
+    "zscale=transfer=linear:npl=100,"
+    "tonemap=tonemap=hable:desat=0,"
+    "zscale=transfer=bt709:matrix=bt709:primaries=bt709,"
+    "format=yuv420p"
+)
+
+# Everything this pipeline emits is SDR yuv420p at or below 1080p, so the output
+# is always BT.709 limited range. Saying so costs nothing and stops an untagged
+# file being guessed at BT.601 by a player or platform — a classic cause of
+# "the skin tones look wrong".
+COLOUR_ARGS = [
+    "-color_primaries", "bt709", "-color_trc", "bt709",
+    "-colorspace", "bt709", "-color_range", "tv",
+]
+
 
 @dataclass
 class RenderResult:
@@ -195,9 +218,12 @@ def render_clip(
         # and what makes scrubbing in the preview responsive.
         "-g", str(max(2, int(round(target_fps * 2)))),
         "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
-        "-af", "loudnorm=I=-14:TP=-1.5:LRA=11",
+        # -2.0 rather than -1.5: the limiter hits its ceiling exactly in PCM,
+        # but the AAC encoder downstream overshoots it by ~0.4dB, which spends
+        # the whole safety margin platforms expect you to leave.
+        "-af", "loudnorm=I=-14:TP=-2.0:LRA=11",
         "-movflags", "+faststart",
-    ]
+    ] + COLOUR_ARGS
     # Render to a temp file and swap it in, so a viewer streaming the previous
     # version of this clip never sees a half-written file.
     staging = out_video.with_name(out_video.name + ".part.mp4")
@@ -211,6 +237,10 @@ def render_clip(
 
         def build(active: speaker.CropPlan) -> list[str]:
             chain = ["setpts=PTS-STARTPTS"]
+            if info.interlaced:
+                chain.append(DEINTERLACE)
+            if info.hdr:
+                chain.append(TONEMAP)
             if active.mode != "full-frame":
                 chain.append(
                     f"crop={active.crop_w}:{active.crop_h}:"
@@ -265,7 +295,7 @@ def render_clip(
 
     run([
         config.FFMPEG, "-y", "-ss", f"{min(1.0, duration / 3):.2f}", "-i", str(out_video),
-        "-frames:v", "1", "-q:v", "3", str(out_thumb),
+        "-frames:v", "1", "-q:v", "2", str(out_thumb),
     ], "thumbnail")
     ass_path.unlink(missing_ok=True)
 

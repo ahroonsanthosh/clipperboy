@@ -33,11 +33,13 @@ limits, nothing sent to a third party. Every component is free and open source.
 
 Audio is loudness-normalised to −14 LUFS so clips don't arrive quiet.
 
-**Export settings**: H.264 high profile, CRF 20 (~6.5 Mbps on a 1080x1920 clip),
-lanczos scaling, a keyframe every 2 seconds, AAC 192 kbps at 48 kHz,
-`+faststart`. The **source frame rate is preserved** rather than forced —
-resampling 25fps to 30 duplicates every fifth frame, which reads as judder on
-any movement.
+**Export settings**: H.264 high profile at the CRF chosen by the Export quality
+setting (see the table below), lanczos scaling, a keyframe every 2 seconds, AAC
+192 kbps at 48 kHz, `+faststart`, and output explicitly tagged BT.709 limited
+range. The **source frame rate is preserved** rather than forced — resampling
+25fps to 30 duplicates every fifth frame, which reads as judder on any movement.
+Rotated (phone-shot) footage, interlaced footage and HDR footage are each
+detected and handled; see *Why clips are sharp*.
 
 ### Why clips are sharp
 
@@ -59,9 +61,31 @@ better on a sharpness metric but put a visible bright rim around dark-on-light
 text and around hair against a pale wall, so 0.8 is where it stops. Captions are
 burned in *after* the sharpening, so they're composited crisp and never ring.
 When the render is scaling down — a 4K source into 1080x1920 — no sharpening is
-applied at all, since it would only add ringing. CRF 18 and `-tune film`/`-tune
-grain` were measured for this chain and rejected: 50% more bytes, no measurable
-gain.
+applied at all, since it would only add ringing. `-tune film` and `-tune grain`
+were measured for this chain and rejected: both scored *lower*, and `grain` was
+47% larger.
+
+**Rotated footage is measured correctly.** ffprobe reports a video's *coded*
+size, but ffmpeg's decoder auto-rotates, so a portrait phone clip reaches the
+filters already turned. Reading the coded size meant a 1920x1080-coded,
+1080x1920-actual video had a 608x1080 crop applied to a 1080-wide frame — 32% of
+the pixels, upscaled 1.78x, with the pan range clamped. Rotation is now read
+from the display matrix and applied before any geometry is computed, so a
+portrait source passes through whole.
+
+**Interlaced and HDR sources are handled.** Interlaced footage is deinterlaced
+with `bwdif` before scaling — otherwise every moving edge combs, the scaler
+interpolates across fields and the sharpener amplifies it, all baked
+permanently into the H.264. An HDR (PQ or HLG) source is tone-mapped to BT.709
+rather than passed through, which would otherwise produce a flat, dark file
+carrying an 8-bit PQ tag that is out of spec.
+
+**Loudness**: measured with `ebur128`, a full-length clip lands on −14.0 LUFS
+exactly. Two-pass `loudnorm` was measured against single-pass and deviated by at
+most 0.01 dB across a whole file, so it is not used. Clips under about 10
+seconds run up to 0.8 LU hot, since the normaliser needs a few seconds to
+settle. The true-peak ceiling is set to −2.0 rather than −1.5 because the AAC
+encoder overshoots the limiter by roughly 0.4 dB.
 
 ---
 

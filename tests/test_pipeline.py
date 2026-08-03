@@ -763,3 +763,90 @@ def test_output_keeps_the_source_frame_rate(tmp_path, fake_transcript):
         "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", str(result.video_path),
     ], check=True, capture_output=True, text=True).stdout.strip()
     assert abs(int(frames) - round(out.duration * 25)) <= 3
+
+
+# --- source metadata that changes the render ------------------------------
+
+def _rotated(tmp_path, degrees):
+    flat = tmp_path / "flat.mp4"
+    subprocess.run([
+        "ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=25:duration=2",
+        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(flat),
+    ], check=True, capture_output=True)
+    out = tmp_path / f"rot{degrees}.mp4"
+    subprocess.run([
+        "ffmpeg", "-y", "-display_rotation", str(degrees), "-i", str(flat),
+        "-c", "copy", str(out),
+    ], check=True, capture_output=True)
+    return out
+
+
+def test_probe_reports_the_rotated_dimensions(tmp_path):
+    """ffprobe gives the CODED size but ffmpeg's decoder auto-rotates, so the
+    filter graph sees the frame turned. Taking the coded size meant a portrait
+    phone clip had a 608x1080 crop applied to a 1080-wide frame."""
+    info = media.probe(_rotated(tmp_path, 90))
+    assert info.rotation == 90
+    assert (info.width, info.height) == (1080, 1920)
+
+    # ...and that matches what ffmpeg actually hands the filters.
+    transcoded = tmp_path / "re.mp4"
+    subprocess.run([
+        "ffmpeg", "-y", "-i", str(_rotated(tmp_path, 90)), "-frames:v", "2",
+        "-c:v", "libx264", "-preset", "ultrafast", str(transcoded),
+    ], check=True, capture_output=True)
+    seen = media.probe(transcoded)
+    assert (seen.width, seen.height) == (info.width, info.height)
+
+
+def test_a_rotated_portrait_source_is_not_cropped(tmp_path, fake_transcript):
+    """A 1080x1920 phone clip already is 9:16 — it must pass through whole, not
+    have a third of it cut out and blown up."""
+    src = _rotated(tmp_path, 90)
+    info = media.probe(src)
+    tr = fake_transcript(info.duration)
+    result = render.render_clip(
+        source=src, info=info, start=0.2, end=1.8, words=tr.words, aspect="9:16",
+        out_video=tmp_path / "r.mp4", out_thumb=tmp_path / "r.jpg",
+        out_srt=tmp_path / "r.srt", work_dir=tmp_path,
+    )
+    assert result.crop_mode == "full-frame", "a portrait source was cropped anyway"
+    assert (media.probe(result.video_path).width,
+            media.probe(result.video_path).height) == (1080, 1920)
+
+
+def test_output_is_tagged_bt709(tmp_path, video_fixture, fake_transcript):
+    """An untagged file gets guessed at BT.601 by some players — the classic
+    'skin tones look wrong' bug."""
+    info = media.probe(video_fixture)
+    tr = fake_transcript(info.duration)
+    result = render.render_clip(
+        source=video_fixture, info=info, start=2.0, end=8.0, words=tr.words,
+        aspect="9:16", out_video=tmp_path / "c.mp4", out_thumb=tmp_path / "c.jpg",
+        out_srt=tmp_path / "c.srt", work_dir=tmp_path,
+    )
+    out = subprocess.run([
+        "ffprobe", "-v", "error", "-select_streams", "v", "-show_entries",
+        "stream=color_space,color_transfer,color_primaries,color_range",
+        "-of", "default=nw=1", str(result.video_path),
+    ], check=True, capture_output=True, text=True).stdout
+    for field in ("color_space=bt709", "color_transfer=bt709",
+                  "color_primaries=bt709", "color_range=tv"):
+        assert field in out, f"{field} missing from:\n{out}"
+
+
+def test_interlaced_sources_are_detected(tmp_path):
+    src = tmp_path / "int.mp4"
+    subprocess.run([
+        "ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc2=size=720x576:rate=25:duration=2",
+        "-vf", "interlace", "-c:v", "libx264", "-preset", "ultrafast",
+        "-flags", "+ilme+ildct", "-top", "1", "-pix_fmt", "yuv420p", str(src),
+    ], check=True, capture_output=True)
+    assert media.probe(src).interlaced is True
+
+    progressive = tmp_path / "prog.mp4"
+    subprocess.run([
+        "ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc2=size=720x576:rate=25:duration=1",
+        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(progressive),
+    ], check=True, capture_output=True)
+    assert media.probe(progressive).interlaced is False

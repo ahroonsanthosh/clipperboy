@@ -32,6 +32,13 @@ class MediaInfo:
     height: int
     fps: float
     size_bytes: int
+    rotation: int = 0          # display-matrix rotation, already applied to w/h
+    interlaced: bool = False
+    hdr: bool = False
+    colour_space: str = ""
+    colour_trc: str = ""
+    colour_primaries: str = ""
+    colour_range: str = ""
 
     @property
     def is_audio_only(self) -> bool:
@@ -55,6 +62,24 @@ def probe(path: Path) -> MediaInfo:
 
     width = int(video.get("width", 0)) if video else 0
     height = int(video.get("height", 0)) if video else 0
+
+    # ffprobe reports the CODED size, but ffmpeg's decoder auto-rotates, so a
+    # phone-shot portrait clip arrives at the filter graph already turned. Taking
+    # the coded size meant every crop was computed against the wrong frame: a
+    # 1920x1080-coded, 1080x1920-actual video had a 608x1080 window applied to a
+    # 1080-wide frame — 32% of the pixels, upscaled 1.78x, and the pan range
+    # clamped. Report what the filters will actually see.
+    rotation = 0
+    if video:
+        for side in video.get("side_data_list", []) or []:
+            if "rotation" in side:
+                try:
+                    rotation = int(round(float(side["rotation"]))) % 360
+                except (TypeError, ValueError):
+                    rotation = 0
+                break
+    if rotation in (90, 270):
+        width, height = height, width
     fps = 30.0
     if video and video.get("avg_frame_rate", "0/0") not in ("0/0", "0/1"):
         num, _, den = video["avg_frame_rate"].partition("/")
@@ -66,6 +91,9 @@ def probe(path: Path) -> MediaInfo:
     if duration <= 0:
         raise MediaError("Could not read a duration from this file — is it a valid media file?")
 
+    trc = (video.get("color_transfer") or "") if video else ""
+    field_order = (video.get("field_order") or "progressive") if video else "progressive"
+
     return MediaInfo(
         duration=duration,
         has_video=video is not None,
@@ -73,6 +101,17 @@ def probe(path: Path) -> MediaInfo:
         height=height,
         fps=fps or 30.0,
         size_bytes=path.stat().st_size,
+        rotation=rotation,
+        # Interlaced footage combs badly once scaled and sharpened, and the
+        # combing is then baked into the H.264 permanently.
+        interlaced=field_order not in ("progressive", "unknown", ""),
+        # PQ/HLG passed through untouched produces a flat, dark SDR file, and
+        # forcing 10-bit PQ down to 8-bit keeps a tag that is out of spec.
+        hdr=trc in ("smpte2084", "arib-std-b67"),
+        colour_space=(video.get("color_space") or "") if video else "",
+        colour_trc=trc,
+        colour_primaries=(video.get("color_primaries") or "") if video else "",
+        colour_range=(video.get("color_range") or "") if video else "",
     )
 
 
