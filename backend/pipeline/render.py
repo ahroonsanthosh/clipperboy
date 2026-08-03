@@ -126,15 +126,26 @@ def render_clip(
     crop_mode = "audio-waveform"
     faces_found = 0
 
-    encode_args = [
-        # superfast/crf23 measured 8.0s vs veryfast/crf20's 12.1s on a 40s
-        # 1080x1920 clip, at higher SSIM (0.9883 vs 0.9854). ultrafast is a
-        # false economy — it drops CABAC and deblocking, which shows as ringing
-        # on burned-in caption edges.
-        "-c:v", "libx264", "-preset", "superfast", "-crf", "23",
+    # Match the source frame rate rather than forcing one. Resampling 25fps to
+    # 30 inserts a duplicate every fifth frame — measured 150 frames becoming
+    # 180 — which reads as judder on any camera or hand movement. Only cap
+    # above 60, which no platform wants anyway.
+    src_fps = info.fps if info.has_video and 1 < info.fps <= 240 else 30.0
+    target_fps = min(src_fps, 60.0)
+    rate_args = ["-r", f"{target_fps:.3f}"] if src_fps > 60.0 else []
+
+    encode_args = rate_args + [
+        # superfast is the sweet spot: measured 8.0s against veryfast's 12.1s on
+        # a 40s 1080x1920 clip, at *higher* SSIM. Encode time is near-flat across
+        # crf 19-23 (5.9s vs 5.6s), so quality here is essentially free — hence
+        # crf 20 rather than 23. ultrafast is a false economy: it drops CABAC and
+        # deblocking, which rings the burned-in caption edges.
+        "-c:v", "libx264", "-preset", "superfast", "-crf", "20",
         "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.1",
-        "-r", "30", "-g", "60",
-        "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
+        # A keyframe every 2 seconds: what the platforms' own re-encoders expect,
+        # and what makes scrubbing in the preview responsive.
+        "-g", str(max(2, int(round(target_fps * 2)))),
+        "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
         "-af", "loudnorm=I=-14:TP=-1.5:LRA=11",
         "-movflags", "+faststart",
     ]
@@ -156,9 +167,13 @@ def render_clip(
                     f"crop={active.crop_w}:{active.crop_h}:"
                     f"x='{active.expression()}':y=(ih-oh)/2"
                 )
+            # A 9:16 crop out of 1080p is ~607px wide and has to be scaled up
+            # to 1080 — a 1.78x upscale, where the resampler visibly matters.
+            # Lanczos holds detail and caption edges far better than the default
+            # bicubic, at negligible cost.
             chain.append(
-                f"scale={width}:{height}:force_original_aspect_ratio=increase,"
-                f"crop={width}:{height}"
+                f"scale={width}:{height}:force_original_aspect_ratio=increase"
+                f":flags=lanczos,crop={width}:{height}"
             )
             chain.append("setsar=1")
             if burn_captions and clip_words:

@@ -524,3 +524,34 @@ def test_no_clip_is_longer_than_the_limit(video_fixture, tmp_path, fake_transcri
         out_srt=tmp_path / "cap.srt", work_dir=tmp_path,
     )
     assert media.probe(result.video_path).duration <= media.config.MAX_CLIP_SEC + 0.15
+
+
+def test_output_keeps_the_source_frame_rate(tmp_path, fake_transcript):
+    """Forcing 30fps on a 25fps source duplicates every fifth frame, which reads
+    as judder on any movement."""
+    src = tmp_path / "25fps.mp4"
+    subprocess.run([
+        "ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=25:duration=8",
+        "-f", "lavfi", "-i", "sine=frequency=300:duration=8",
+        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-shortest", str(src),
+    ], check=True, capture_output=True)
+
+    info = media.probe(src)
+    assert round(info.fps) == 25
+    tr = fake_transcript(info.duration)
+    result = render.render_clip(
+        source=src, info=info, start=1.0, end=6.0, words=tr.words, aspect="9:16",
+        out_video=tmp_path / "r.mp4", out_thumb=tmp_path / "r.jpg",
+        out_srt=tmp_path / "r.srt", work_dir=tmp_path,
+    )
+
+    out = media.probe(result.video_path)
+    assert round(out.fps) == 25, f"frame rate was resampled to {out.fps}"
+
+    # And no duplicated frames were introduced.
+    frames = subprocess.run([
+        "ffprobe", "-v", "error", "-select_streams", "v", "-count_frames",
+        "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", str(result.video_path),
+    ], check=True, capture_output=True, text=True).stdout.strip()
+    assert abs(int(frames) - round(out.duration * 25)) <= 3

@@ -31,6 +31,11 @@ limits, nothing sent to a third party. Every component is free and open source.
 
 Audio is loudness-normalised to −14 LUFS so clips don't arrive quiet.
 
+**Export settings**: H.264 high profile, CRF 20, lanczos scaling, a keyframe
+every 2 seconds, AAC 192 kbps at 48 kHz, `+faststart`. The **source frame rate
+is preserved** rather than forced — resampling 25fps to 30 duplicates every
+fifth frame, which reads as judder on any movement.
+
 ---
 
 ## Get it running

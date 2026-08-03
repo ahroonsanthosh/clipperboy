@@ -361,9 +361,21 @@ def _decide_path(times: list[float], samples: list[list[Face]],
         if i - lo + 1 < win:
             path[i] = active
             continue
-        window = evidence[lo:i + 1].sum(axis=0)
+        block = evidence[lo:i + 1]
+        window = block.sum(axis=0)
         best = int(np.argmax(window))
+
+        # Sustained, not momentary. Summed evidence alone lets a single frame of
+        # mouth movement — a cough, a laugh, a swallow — flip the camera, because
+        # one large value can carry the whole window. Require the challenger to
+        # actually win most of the individual samples too, on at least two of
+        # them, so the evidence has to persist rather than merely spike.
+        speaking_rows = [r for r in block if r.max() > 0]
+        wins = sum(1 for r in speaking_rows if int(np.argmax(r)) == best)
+        sustained = len(speaking_rows) >= 2 and wins * 2 >= len(speaking_rows) + 1
+
         if (best != active
+                and sustained
                 and window[best] > 0
                 and window[best] >= window[active] * (1.0 + SWITCH_MARGIN)
                 and times[lo] - last_switch_t >= MIN_DWELL_S):
