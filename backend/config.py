@@ -26,8 +26,10 @@ MIN_CLIP_SEC = float(os.environ.get("CLIPPERBOY_MIN_CLIP", 18))
 MAX_CLIP_SEC = float(os.environ.get("CLIPPERBOY_MAX_CLIP", 75))
 DEFAULT_CLIP_COUNT = int(os.environ.get("CLIPPERBOY_CLIP_COUNT", 8))
 
-# Source compression: transcode oversized sources to speed the pipeline up.
-COMPRESS_THRESHOLD_MB = float(os.environ.get("CLIPPERBOY_COMPRESS_MB", 800))
+# Speech-to-text tuning. Batched inference is much faster and needs no extra
+# setup; it falls back to the sequential path automatically if unavailable.
+WHISPER_BATCHED = os.environ.get("CLIPPERBOY_WHISPER_BATCHED", "1") != "0"
+WHISPER_BATCH_SIZE = int(os.environ.get("CLIPPERBOY_WHISPER_BATCH", 8))
 
 # Captions use a bundled font so clips look identical on macOS, Windows and Linux.
 FONTS_DIR = ROOT / "assets" / "fonts"

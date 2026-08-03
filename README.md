@@ -13,7 +13,7 @@ limits, nothing sent to a third party. Every component is free and open source.
 
 1. **Takes any podcast file** — video (`.mp4 .mov .mkv .webm .avi`) or audio-only
    (`.mp3 .m4a .wav .flac .ogg`).
-2. **Compresses the source** if it's oversized, so a 4 GB export doesn't slow the
+2. **Downscales the source** if it's above 1080p, so a 4K export doesn't slow the
    rest of the pipeline down (automatic, or force it on/off).
 3. **Transcribes the whole episode** locally with OpenAI Whisper (via
    `faster-whisper`), down to word-level timings.
@@ -89,13 +89,19 @@ without re-running the analysis.
 
 ### How long does it take?
 
-For a 60-minute episode, budget **15–40 minutes** on a recent laptop (Apple
-silicon or a modern 8-core Intel/AMD). On an older dual-core machine it can take
-an hour or more. Transcription is the slow part, and it is dramatically faster on
-a machine with an NVIDIA GPU — that's detected and used automatically.
+For a 60-minute episode, budget roughly **10–15 minutes** on a recent laptop.
+Transcription is now the bulk of that, and it's dramatically faster on a machine
+with an NVIDIA GPU — detected and used automatically.
 
-Want it faster? Set `CLIPPERBOY_WHISPER_MODEL=tiny`, choose "Always" for shrink
-the file first, or ask for fewer clips.
+Want it faster still? Set `CLIPPERBOY_WHISPER_MODEL=tiny`, ask for fewer clips,
+or untick **Burn captions into the video**.
+
+Earlier versions took 15–40 minutes. Most of that was a full re-encode of the
+whole episode that fired on any file over 800 MB — measured at ~22 minutes for a
+60-minute episode, to save under a minute of decoding later. It now only
+downscales genuinely oversized (above-1080p) sources. Crop planning was rebuilt
+to walk each clip once instead of seeking per sample (14.8s → 2.8s per clip),
+clips render in parallel, and transcription uses batched inference.
 
 ---
 
@@ -109,7 +115,8 @@ Set these as environment variables (or in `docker-compose.yml`):
 | `CLIPPERBOY_CLIP_COUNT` | `8` | Default number of clips to find. |
 | `CLIPPERBOY_ASPECT` | `9:16` | Default aspect ratio. |
 | `CLIPPERBOY_MIN_CLIP` / `CLIPPERBOY_MAX_CLIP` | `18` / `75` | Clip length bounds, in seconds. |
-| `CLIPPERBOY_COMPRESS_MB` | `800` | Above this file size, "automatic" compression kicks in. |
+| `CLIPPERBOY_WHISPER_BATCHED` | `1` | Batched transcription — much faster. `0` for the sequential path. |
+| `CLIPPERBOY_WHISPER_BATCH` | `8` | Batch size. 8 suits a CPU; try 16–24 on a GPU. |
 | `CLIPPERBOY_DATA` | `./data` | Where uploads, clips and models are stored. |
 | `CLIPPERBOY_USE_OLLAMA` | `auto` | `off` to disable the optional local-LLM title polish. |
 | `CLIPPERBOY_OLLAMA_MODEL` / `OLLAMA_HOST` | `llama3.2` / `http://127.0.0.1:11434` | Optional: if you run [Ollama](https://ollama.com), titles and summaries are written by a local model. Purely optional — it never blocks a run. |

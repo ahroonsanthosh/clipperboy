@@ -1,6 +1,7 @@
 """Local speech-to-text with faster-whisper. No API key, runs offline."""
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -84,8 +85,12 @@ def _load_model():
             if device == "cuda" and compute == "int8":
                 compute = "float16"
         try:
+            # CTranslate2 defaults to 4 intra-op threads regardless of the
+            # machine, which leaves most of a bigger CPU idle.
+            threads = 0 if device == "cuda" else (os.cpu_count() or 4)
             _MODEL_CACHE[key] = WhisperModel(
-                config.WHISPER_MODEL, device=device, compute_type=compute
+                config.WHISPER_MODEL, device=device, compute_type=compute,
+                cpu_threads=threads,
             )
         except Exception as exc:
             raise ModelUnavailable(
@@ -100,30 +105,58 @@ def _load_model():
 def transcribe(audio_path: Path, duration: float, progress=None) -> Transcript:
     """Word-level transcription. `progress(fraction, message)` is called as it goes."""
     model = _load_model()
-    seg_iter, info = model.transcribe(
-        str(audio_path),
-        word_timestamps=True,
+
+    # Shared settings. temperature=0 and no prompt conditioning matter for speed:
+    # the default temperature ladder re-decodes any segment that trips Whisper's
+    # logprob/compression thresholds, at best_of=5 — so beam_size=1 does not
+    # actually bound the work on difficult audio.
+    common = dict(
+        word_timestamps=True,          # the karaoke captions need word timings
         vad_filter=True,
-        vad_parameters={"min_silence_duration_ms": 400},
         beam_size=1,
+        temperature=0.0,
+        condition_on_previous_text=False,
     )
 
-    total = duration or getattr(info, "duration", 0.0) or 1.0
-    segments: list[Segment] = []
-    for s in seg_iter:
-        words = [
-            Word(start=float(w.start), end=float(w.end), text=w.word.strip())
-            for w in (s.words or [])
-            if w.start is not None and w.end is not None and w.word.strip()
-        ]
-        text = s.text.strip()
-        if not text:
-            continue
-        segments.append(Segment(start=float(s.start), end=float(s.end), text=text, words=words))
-        if progress:
-            progress(min(0.99, float(s.end) / total), f"Transcribing… {_clock(s.end)} / {_clock(total)}")
+    def collect(seg_iter, info) -> Transcript:
+        total = duration or getattr(info, "duration", 0.0) or 1.0
+        segments: list[Segment] = []
+        for s in seg_iter:
+            words = [
+                Word(start=float(w.start), end=float(w.end), text=w.word.strip())
+                for w in (s.words or [])
+                if w.start is not None and w.end is not None and w.word.strip()
+            ]
+            text = s.text.strip()
+            if not text:
+                continue
+            segments.append(Segment(start=float(s.start), end=float(s.end),
+                                    text=text, words=words))
+            if progress:
+                progress(min(0.99, float(s.end) / total),
+                         f"Transcribing… {_clock(s.end)} / {_clock(total)}")
+        return Transcript(segments=segments,
+                          language=getattr(info, "language", "en"), duration=total)
 
-    return Transcript(segments=segments, language=getattr(info, "language", "en"), duration=total)
+    if config.WHISPER_BATCHED:
+        try:
+            from faster_whisper import BatchedInferencePipeline
+
+            # Note the whole consumption is inside the try: transcribe() returns
+            # a generator, so an incompatibility surfaces during iteration, not
+            # at the call. A failure here must never sink the job.
+            return collect(*BatchedInferencePipeline(model=model).transcribe(
+                str(audio_path), batch_size=config.WHISPER_BATCH_SIZE, **common
+            ))
+        except Exception:
+            if progress:
+                progress(0.0, "Transcribing (standard mode)…")
+
+    return collect(*model.transcribe(
+        str(audio_path),
+        vad_parameters={"min_silence_duration_ms": 400},
+        **common,
+    ))
 
 
 def _clock(seconds: float) -> str:

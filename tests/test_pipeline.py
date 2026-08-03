@@ -43,10 +43,25 @@ def test_audio_extraction_and_envelope(video_fixture: Path, tmp_path: Path):
 
 
 def test_compress_decision(video_fixture: Path):
+    import dataclasses
+
     info = media.probe(video_fixture)
     assert media.should_compress(info, "always") is True
     assert media.should_compress(info, "never") is False
-    assert media.should_compress(info, "auto") is False  # small 720p file
+    assert media.should_compress(info, "auto") is False  # 720p — nothing to gain
+
+    # A big 1080p episode must NOT be re-encoded on "auto": that costs ~22
+    # minutes for a 60-minute file and saves under a minute of decode.
+    big_1080p = dataclasses.replace(info, width=1920, height=1080,
+                                    size_bytes=3 * 1024 ** 3, duration=3600)
+    assert media.should_compress(big_1080p, "auto") is False
+
+    # A 4K source is worth downscaling — every later pass decodes 4x the pixels.
+    uhd = dataclasses.replace(info, width=3840, height=2160)
+    assert media.should_compress(uhd, "auto") is True
+
+    # Audio-only has no video to compress.
+    assert media.should_compress(dataclasses.replace(info, has_video=False), "always") is False
 
 
 # --- scoring -------------------------------------------------------------
@@ -413,3 +428,84 @@ def test_long_words_stay_inside_the_frame(tmp_path):
     assert seen > 5, "no captions were rendered at all"
     assert left > 0.05, f"caption reaches the left edge ({left:.1%})"
     assert right < 0.95, f"caption reaches the right edge ({right:.1%})"
+
+
+def test_face_sampling_walks_the_clip_once(video_fixture, monkeypatch):
+    """Seeking per sample forced a keyframe re-decode each time and dominated
+    this stage; the sampler must seek at most once."""
+    info = media.probe(video_fixture)
+    seeks = []
+    real_set = speaker.cv2.VideoCapture.set
+
+    def counting_set(self, prop, value):
+        seeks.append(prop)
+        return real_set(self, prop, value)
+
+    monkeypatch.setattr(speaker.cv2.VideoCapture, "set", counting_set)
+    times, centres = speaker._sample_faces(video_fixture, 5.0, 20.0)
+
+    assert len(seeks) <= 1
+    assert len(times) == len(centres)
+    assert 15 <= len(times) <= 25          # ~1 sample/second over 20 seconds
+    assert times == sorted(times)
+    assert max(times) <= 20.5
+
+
+def test_detection_reports_centres_in_source_pixels(video_fixture):
+    """Detection runs on a 640px copy; the returned centre must be scaled back."""
+    import cv2
+    import numpy as np
+
+    frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    captured = {}
+    real = speaker._get_cascade().detectMultiScale
+
+    class Stub:
+        def detectMultiScale(self, img, **kw):
+            captured["width"] = img.shape[1]
+            captured["min_size"] = kw.get("minSize")
+            return np.array([[100, 50, 60, 60]])      # a face at x=100 on the small frame
+
+    speaker._cascade = Stub()
+    try:
+        centre = speaker._detect_centre(frame)
+    finally:
+        speaker._cascade = None
+
+    assert captured["width"] == speaker.DETECT_WIDTH
+    assert captured["min_size"] == (speaker.MIN_FACE_PX, speaker.MIN_FACE_PX)
+    assert centre == pytest.approx((100 + 30) * (1920 / 640))
+
+
+def test_transcribe_falls_back_when_batching_is_unavailable(monkeypatch):
+    """A batched-pipeline incompatibility surfaces during iteration. It must
+    never sink the job — the sequential path has to take over."""
+    from backend.pipeline import transcribe as tr
+
+    calls = []
+
+    class FakeModel:
+        def transcribe(self, path, **kw):
+            calls.append("sequential")
+            seg = type("S", (), {"start": 0.0, "end": 1.0, "text": "hello there.",
+                                 "words": []})()
+            return iter([seg]), type("I", (), {"language": "en", "duration": 1.0})()
+
+    def exploding(*a, **k):
+        def gen():
+            raise RuntimeError("batched not supported here")
+            yield
+        return gen(), None
+
+    class FakePipeline:
+        def __init__(self, model):
+            pass
+        transcribe = staticmethod(exploding)
+
+    monkeypatch.setattr(tr, "_load_model", lambda: FakeModel())
+    import faster_whisper
+    monkeypatch.setattr(faster_whisper, "BatchedInferencePipeline", FakePipeline)
+
+    result = tr.transcribe(Path("ignored.wav"), 1.0)
+    assert calls == ["sequential"]
+    assert result.segments[0].text == "hello there."

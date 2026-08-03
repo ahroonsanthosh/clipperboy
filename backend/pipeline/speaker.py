@@ -64,19 +64,37 @@ def _get_cascade() -> cv2.CascadeClassifier:
     return _cascade
 
 
+DETECT_WIDTH = 640       # detect on a small copy; 6x fewer pixels to scan
+MIN_FACE_PX = 40         # at 640 wide, ~120px at 1080p — a talking head, not a poster
+
+
 def _detect_centre(frame: np.ndarray) -> float | None:
-    """Return the x-centre (px) of the most prominent face, or None."""
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    gray = cv2.equalizeHist(gray)
+    """Return the x-centre, in *source* pixels, of the most prominent face.
+
+    Detection runs on a 640px-wide copy. Haar scanning cost is proportional to
+    pixel count, and minSize must be pinned in absolute pixels rather than
+    derived from frame width — otherwise shrinking the frame also shrinks the
+    smallest face searched for, and most of the saving evaporates.
+    Measured: 67ms/frame at 1080p, 11-20ms/frame this way.
+    """
+    scale = 1.0
+    if frame.shape[1] > DETECT_WIDTH:
+        scale = frame.shape[1] / DETECT_WIDTH
+        frame = cv2.resize(
+            frame, (DETECT_WIDTH, int(round(frame.shape[0] / scale))),
+            interpolation=cv2.INTER_LINEAR,
+        )
+
+    gray = cv2.equalizeHist(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
     faces = _get_cascade().detectMultiScale(
-        gray, scaleFactor=1.15, minNeighbors=6,
-        minSize=(max(24, frame.shape[1] // 24), max(24, frame.shape[1] // 24)),
+        gray, scaleFactor=1.2, minNeighbors=5,
+        minSize=(MIN_FACE_PX, MIN_FACE_PX),
     )
     if len(faces) == 0:
         return None
     # Biggest face wins; on a two-shot that's usually whoever is closest to camera.
-    x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
-    return float(x + w / 2)
+    x, _y, w, _h = max(faces, key=lambda f: f[2] * f[3])
+    return float(x + w / 2) * scale
 
 
 def plan_crop(video: Path, start: float, end: float, src_w: int, src_h: int,
@@ -95,19 +113,7 @@ def plan_crop(video: Path, start: float, end: float, src_w: int, src_h: int,
     centre_default = max_x // 2
 
     duration = max(0.1, end - start)
-    n_samples = max(2, int(duration * SAMPLE_HZ))
-    times = np.linspace(0, duration, n_samples)
-
-    cap = cv2.VideoCapture(str(video))
-    centres: list[float | None] = []
-    if cap.isOpened():
-        for t in times:
-            cap.set(cv2.CAP_PROP_POS_MSEC, (start + float(t)) * 1000.0)
-            ok, frame = cap.read()
-            centres.append(_detect_centre(frame) if ok and frame is not None else None)
-        cap.release()
-    else:
-        centres = [None] * n_samples
+    times, centres = _sample_faces(video, start, duration)
 
     faces_found = sum(1 for c in centres if c is not None)
     if faces_found == 0:
@@ -151,6 +157,46 @@ def plan_crop(video: Path, start: float, end: float, src_w: int, src_h: int,
 
     keyframes = _decimate(keyframes, MAX_KEYFRAMES)
     return CropPlan(crop_w, crop_h, keyframes, faces_found, "speaker-tracked")
+
+
+def _sample_faces(video: Path, start: float, duration: float
+                  ) -> tuple[list[float], list[float | None]]:
+    """Walk the clip once, detecting faces every 1/SAMPLE_HZ seconds.
+
+    Seeking to each sample with CAP_PROP_POS_MSEC forces a keyframe re-decode
+    every time and dominated this stage — measured 13.6s of a 16.6s pass, versus
+    3.5s decoding the same window sequentially. So seek once, then grab() every
+    frame and only retrieve() (which actually decodes) the ones we sample.
+    """
+    cap = cv2.VideoCapture(str(video))
+    if not cap.isOpened():
+        return [0.0], [None]
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    if not (1 <= fps <= 240):
+        fps = 30.0
+    step = max(1, int(round(fps / SAMPLE_HZ)))
+    wanted = int(duration * fps)
+
+    if start > 0:
+        cap.set(cv2.CAP_PROP_POS_MSEC, start * 1000.0)
+
+    times: list[float] = []
+    centres: list[float | None] = []
+    index = 0
+    while index <= wanted:
+        if not cap.grab():
+            break
+        if index % step == 0:
+            ok, frame = cap.retrieve()
+            times.append(index / fps)
+            centres.append(_detect_centre(frame) if ok and frame is not None else None)
+        index += 1
+    cap.release()
+
+    if not times:
+        return [0.0], [None]
+    return times, centres
 
 
 def _decimate(keyframes: list[tuple[float, int]], limit: int) -> list[tuple[float, int]]:

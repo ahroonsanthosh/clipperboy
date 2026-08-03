@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import traceback
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -123,10 +125,11 @@ class JobStore:
         if job.id not in self._jobs or job.id in self._cancelled:
             return
         try:
-            target = self._job_dir(job.id) / "job.json"
-            tmp = target.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(job.to_dict(), indent=2))
-            tmp.replace(target)   # atomic: a crash mid-write can't corrupt the job
+            with self._lock:
+                target = self._job_dir(job.id) / "job.json"
+                tmp = target.with_suffix(f".{uuid.uuid4().hex[:6]}.tmp")
+                tmp.write_text(json.dumps(job.to_dict(), indent=2))
+                tmp.replace(target)   # atomic: a crash mid-write can't corrupt it
         except Exception:
             pass
 
@@ -277,9 +280,18 @@ def process(job_id: str, source_path: Path, compress_mode: str) -> None:
 
         lo, hi = _SPAN["render"]
         words = tr.words
-        for i, clip in enumerate(job.clips):
-            _set_stage(job, "render", lo + (hi - lo) * (i / len(job.clips)),
-                       f"Rendering clip {i + 1} of {len(job.clips)} — {clip.title}")
+        total = len(job.clips)
+        # Crop planning is single-core and decode-bound while encoding is
+        # multi-core, so overlapping clips wins more than either alone. Past
+        # cpu_count/2 the encoders just contend with each other.
+        workers = min(total, max(2, (os.cpu_count() or 2) // 2))
+        finished = 0
+        counter = threading.Lock()
+
+        def render_one(clip: Clip) -> None:
+            nonlocal finished
+            if STORE.is_cancelled(job.id):
+                return
             clip.status = "rendering"
             STORE.persist(job)
             try:
@@ -302,7 +314,18 @@ def process(job_id: str, source_path: Path, compress_mode: str) -> None:
             except Exception as exc:  # one bad clip shouldn't sink the batch
                 clip.status = "failed"
                 clip.error = str(exc)[:400]
+
+            with counter:
+                finished += 1
+                done_now = finished
+            job.progress = round(lo + (hi - lo) * (done_now / total), 4)
+            job.message = f"Finished {done_now} of {total} clips"
             STORE.persist(job)
+
+        _set_stage(job, "render", lo, f"Editing {total} clips")
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(render_one, job.clips))
+        _check_cancelled(job)
 
         ready = sum(1 for c in job.clips if c.status == "ready")
         job.status = "done"

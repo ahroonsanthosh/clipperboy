@@ -64,11 +64,12 @@
           <div class="option">
             <label for="compress">Shrink the file first</label>
             <select id="compress" name="compress">
-              <option value="auto" selected>Only if it's very large (recommended)</option>
-              <option value="always">Always — finishes sooner</option>
+              <option value="auto" selected>Only if it's above 1080p (recommended)</option>
+              <option value="always">Always — smaller working file</option>
               <option value="never">Never — keep full quality</option>
             </select>
-            <p class="option-hint">Big uploads are scaled to 1080p so the work goes faster.</p>
+            <p class="option-hint">4K footage is scaled to 1080p, which speeds everything
+              up. "Always" re-encodes the whole episode first and usually makes it slower.</p>
           </div>
 
           <div class="option">

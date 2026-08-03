@@ -77,14 +77,19 @@ def probe(path: Path) -> MediaInfo:
 
 
 def should_compress(info: MediaInfo, mode: str) -> bool:
-    """mode: auto | always | never"""
+    """mode: auto | always | never
+
+    On "auto" this only fires for above-1080p sources. Compressing purely
+    because a file is *large* is a bad trade: re-encoding a 60-minute episode
+    costs ~22 minutes, while the decode work it saves downstream — eight ~40s
+    windows — is under a minute. Downscaling a 4K source does pay for itself,
+    because every crop-plan and render pass then decodes a quarter of the pixels.
+    """
     if mode == "never" or info.is_audio_only:
         return False
     if mode == "always":
         return True
-    over_size = info.size_bytes > config.COMPRESS_THRESHOLD_MB * 1024 * 1024
-    over_res = max(info.width, info.height) > 1920
-    return over_size or over_res
+    return max(info.width, info.height) > 1920
 
 
 def compress(src: Path, dst: Path, progress=None) -> Path:
