@@ -345,7 +345,7 @@ body {
 .filmstrip-nav { display: flex; gap: 8px; }
 
 .clip-strip {
-  list-style: none; margin: 0; padding: 4px 4px 16px; display: flex; gap: var(--gutter);
+  list-style: none; margin: 0; padding: 4px 4px 16px; display: flex; align-items: stretch; gap: var(--gutter);
   overflow-x: auto; overflow-y: hidden;
   scroll-snap-type: x mandatory; overscroll-behavior-x: contain;
   scrollbar-width: thin;
@@ -353,7 +353,10 @@ body {
 .clip-strip:focus-visible { outline-offset: 0; }
 
 .clip-card {
-  flex: 0 0 300px; width: 300px; height: 660px;   /* equal heights, whatever the aspect */
+  /* Height is driven by the tallest card and flex `stretch` matches the rest,
+     so every card in the row ends level with nothing clipped and nothing to
+     scroll inside it. */
+  flex: 0 0 300px; width: 300px; min-height: 520px;
   display: flex; flex-direction: column; scroll-snap-align: start;
   background: var(--paper); border: 1px solid var(--border);
   border-radius: var(--r); overflow: hidden;
@@ -394,8 +397,7 @@ body {
 .clip-slab.is-pending { background: var(--lavender); }
 
 .clip-body {
-  scrollbar-width: thin;
-  flex: 1; min-height: 0; overflow-y: auto;
+  flex: 1; min-height: 0;
   padding: 16px; display: flex; flex-direction: column; gap: 10px;
 }
 .clip-title { margin: 0; font-size: 1rem; font-weight: 800; line-height: 1.2; letter-spacing: -.02em; }
@@ -403,17 +405,7 @@ body {
   display: flex; flex-wrap: wrap; gap: 2px 10px; margin: 0;
   color: var(--ink-dim); font-size: .74rem; font-variant-numeric: tabular-nums;
 }
-.clip-summary {
-  margin: 0; font-size: .84rem; line-height: 1.4;
-  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden;
-}
-/* When a card's body really does overflow, fade the cut edge so it reads as
-   "there is more below" rather than as a rendering bug. */
-.clip-body.is-scrollable {
-  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 22px), transparent);
-  mask-image: linear-gradient(to bottom, #000 calc(100% - 22px), transparent);
-}
-.clip-body.is-scrollable:focus-within { -webkit-mask-image: none; mask-image: none; }
+.clip-summary { margin: 0; font-size: .84rem; line-height: 1.4; }
 
 .chips { list-style: none; display: flex; flex-wrap: wrap; gap: 5px; margin: 0; padding: 0; }
 .chip {
@@ -422,16 +414,17 @@ body {
 }
 .chip-key { background: transparent; color: var(--ink); border: 1px solid var(--border); font-weight: 600; }
 
-.clip-transcript summary {
-  cursor: pointer; font-weight: 700; font-size: .78rem;
-  min-height: 44px; display: flex; align-items: center;
+/* A text affordance, not a third pill — Download stays the obvious action. */
+.clip-readbtn {
+  margin-top: auto; align-self: start; min-height: 44px; padding: 8px 0;
+  background: none; border: 0; color: var(--ink); font: inherit;
+  font-weight: 700; font-size: .8rem; text-align: left;
+  text-decoration: underline; text-underline-offset: 3px; cursor: pointer;
 }
-.clip-transcript p {
-  margin: 0; font-size: .8rem; color: var(--ink-dim); white-space: pre-wrap;
-}
+.clip-readbtn:hover { text-decoration-thickness: 2px; }
 
-/* Actions live outside the scrolling body: Download must never be something
-   you have to scroll a card to find. */
+/* Actions are pinned below the body so they sit on the same line across the
+   whole strip, whatever each card's text does above them. */
 .clip-foot {
   flex: none; padding: 12px 16px 14px; border-top: 1px solid var(--border);
   display: grid; gap: 8px;
@@ -469,12 +462,22 @@ body {
 .preview-head { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
 .preview-head h2 { margin: 0; font-size: 1.05rem; font-weight: 800; letter-spacing: -.02em; }
 .preview-dialog video {
-  width: 100%; aspect-ratio: 9 / 16; max-height: 64vh; margin-top: 14px;
+  width: 100%; aspect-ratio: 9 / 16; max-height: 48vh; margin-top: 14px;
   background: #101010; border-radius: var(--r-sm); display: block;
 }
 .preview-dialog[data-aspect="1:1"] video { aspect-ratio: 1 / 1; }
 .preview-dialog[data-aspect="16:9"] video { aspect-ratio: 16 / 9; }
 .preview-caption { color: var(--ink-dim); font-size: .8rem; margin: 12px 0 0; }
+.preview-subhead {
+  margin: 16px 0 8px; font-size: .7rem; font-weight: 800;
+  letter-spacing: .12em; text-transform: uppercase; color: var(--ink-dim);
+}
+.preview-transcript {
+  max-height: 20vh; overflow-y: auto; scrollbar-width: thin;
+  padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--r-sm);
+  font-size: .86rem; line-height: 1.45; white-space: pre-wrap;
+}
+.preview-dialog video[hidden] { display: none; }
 
 /* ---------------- narrow ---------------- */
 @media (max-width: 1000px) {
@@ -497,6 +500,6 @@ body {
   .canvas { margin-left: 0; }
   .card { padding: 20px; }
   .results-actions .pillbtn { flex: 1 1 100%; }
-  .clip-card { flex-basis: 268px; width: 268px; height: 600px; }
+  .clip-card { flex-basis: 268px; width: 268px; min-height: 480px; }
   .clip-thumb-btn, .clip-slab { height: 220px; }
 }

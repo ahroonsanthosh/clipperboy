@@ -43,6 +43,7 @@
     dialogTitle: $("preview-title"),
     dialogVideo: $("preview-video"),
     dialogCaption: $("preview-caption"),
+    dialogTranscript: $("preview-transcript"),
     dialogClose: $("preview-close"),
 
     marqueeTrack: $("marquee-track"),
@@ -416,11 +417,8 @@
     const activeId = document.activeElement ? document.activeElement.id : "";
     const scrollY = window.scrollY;
     const scrollX = el.clipGrid.scrollLeft;
-    const open = new Set(
-      [...el.clipGrid.querySelectorAll("details[open]")].map((d) => d.dataset.clip));
-
     el.clipGrid.innerHTML = "";
-    job.clips.forEach((clip) => el.clipGrid.append(buildClipCard(job, clip, open)));
+    job.clips.forEach((clip) => el.clipGrid.append(buildClipCard(job, clip)));
     el.clipGrid.scrollLeft = scrollX;   // a background refresh must not rewind the strip
 
     if (activeId) {
@@ -434,7 +432,7 @@
     if (el.downloadAll.getAttribute("aria-disabled") === "true") e.preventDefault();
   });
 
-  function buildClipCard(job, clip, openTranscripts) {
+  function buildClipCard(job, clip) {
     const li = document.createElement("li");
     li.className = "clip-card";
     const uid = `${job.id}-${clip.id}`;
@@ -539,17 +537,6 @@
       body.append(ul);
     }
 
-    const details = document.createElement("details");
-    details.className = "clip-transcript";
-    details.dataset.clip = clip.id;
-    if (openTranscripts && openTranscripts.has(clip.id)) details.open = true;
-    const summary = document.createElement("summary");
-    summary.textContent = "What's said in this clip";
-    const transcript = document.createElement("p");
-    transcript.textContent = clip.transcript;
-    details.append(summary, transcript);
-    body.append(details);
-
     if (clip.status === "ready") {
       const actions = document.createElement("div");
       actions.className = "clip-actions";
@@ -592,12 +579,22 @@
       }
     }
 
+    // The transcript lives in the preview dialog: you read it when deciding about
+    // one clip, not while scanning the strip. Keeping it out of the card is what
+    // lets every card fit its content with nothing cut and nothing to scroll.
+    if (clip.transcript) {
+      const read = document.createElement("button");
+      read.type = "button";
+      read.id = `text-${uid}`;
+      read.className = "clip-readbtn";
+      read.textContent = "What's said in this clip";
+      read.setAttribute("aria-label", `Read what's said in clip ${clip.index}: ${clip.title}`);
+      read.addEventListener("click", () => openPreview(clip));
+      body.append(read);
+    }
+
     li.append(body);
     if (foot.childElementCount) li.append(foot);
-    // Marked after layout: the fade is only honest when there is more to see.
-    requestAnimationFrame(() => {
-      body.classList.toggle("is-scrollable", body.scrollHeight > body.clientHeight + 2);
-    });
     return li;
   }
 
@@ -668,15 +665,19 @@
 
   function openPreview(clip) {
     lastFocused = document.activeElement;
+    const playable = clip.status === "ready" && Boolean(clip.video);
     el.dialogTitle.textContent = `${clip.index}. ${clip.title}`;
     el.dialog.dataset.aspect = clip.aspect;
-    el.dialogVideo.src = clip.video;
+    el.dialogVideo.hidden = !playable;          // a queued clip has text but no film yet
+    if (playable) el.dialogVideo.src = clip.video;
     el.dialogCaption.textContent =
       `${Math.round(clip.duration)} seconds · ${clip.aspect} · from ${fmtTime(clip.start)} in the episode`;
+    el.dialogTranscript.textContent = clip.transcript;
+    el.dialogTranscript.scrollTop = 0;
     if (typeof el.dialog.showModal === "function") el.dialog.showModal();
     else el.dialog.setAttribute("open", "");
     el.dialogClose.focus();
-    el.dialogVideo.play().catch(() => { /* autoplay blocked — the controls are there */ });
+    if (playable) el.dialogVideo.play().catch(() => { /* autoplay blocked — controls are there */ });
   }
 
   function teardownPreview() {
@@ -697,7 +698,7 @@
   // Keep Tab inside the dialog rather than letting it escape to the page behind.
   el.dialog.addEventListener("keydown", (e) => {
     if (e.key !== "Tab") return;
-    const stops = [el.dialogClose, el.dialogVideo];
+    const stops = [el.dialogClose, el.dialogVideo, el.dialogTranscript].filter((n) => !n.hidden);
     const i = stops.indexOf(document.activeElement);
     e.preventDefault();
     stops[(i + (e.shiftKey ? stops.length - 1 : 1) + stops.length) % stops.length].focus();
