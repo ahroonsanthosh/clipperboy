@@ -142,6 +142,7 @@ def render_clip(
     burn_captions: bool = True,
     title: str = "",
     original: Path | None = None,
+    quality: str = "",
 ) -> RenderResult:
     width, height = config.ASPECTS.get(aspect, config.ASPECTS[config.DEFAULT_ASPECT])
     target_ratio = width / height
@@ -179,18 +180,16 @@ def render_clip(
     target_fps = min(src_fps, 60.0)
     rate_args = ["-r", f"{target_fps:.3f}"] if src_fps > 60.0 else []
 
+    x264_preset, crf = config.QUALITY_PRESETS.get(
+        quality or config.DEFAULT_QUALITY, config.QUALITY_PRESETS[config.DEFAULT_QUALITY])
+
     encode_args = rate_args + [
-        # superfast is the sweet spot: measured 8.0s against veryfast's 12.1s on
-        # a 40s 1080x1920 clip, at *higher* SSIM. Encode time is near-flat across
-        # crf 19-23 (5.9s vs 5.6s), so quality here is essentially free — hence
-        # crf 20 rather than 23. ultrafast is a false economy: it drops CABAC and
-        # deblocking, which rings the burned-in caption edges.
-        # Going below crf 20 to pay for the sharpening filter was measured and
-        # rejected: on a real 1080x1920 clip crf 20 gives 6.5 Mbps, and crf 18
-        # costs 50% more bytes for +0.00002 SSIM. `-tune film` and `-tune grain`
-        # were both measured too — film is marginally *worse*, grain inflates
-        # the file by half. Neither is used.
-        "-c:v", "libx264", "-preset", "superfast", "-crf", "20",
+        # See config.QUALITY_PRESETS for the measurements behind these. The
+        # short version: "superfast" was wasting about half its bitrate, and on
+        # "faster" the encode time is flat across crf, so quality here costs
+        # file size rather than minutes. Slower presets than "faster" bought
+        # nothing measurable for a lot of seconds.
+        "-c:v", "libx264", "-preset", x264_preset, "-crf", str(crf),
         "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.1",
         # A keyframe every 2 seconds: what the platforms' own re-encoders expect,
         # and what makes scrubbing in the preview responsive.

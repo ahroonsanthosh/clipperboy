@@ -256,6 +256,7 @@ body {
 .colour-marigold { background: var(--marigold); }
 .colour-lavender { background: var(--lavender); }
 .colour-grass    { background: var(--grass); }
+.colour-lemon    { background: var(--lemon); }
 
 .option label, .option .option-label {
   display: block; font-weight: 800; font-size: .95rem; margin-bottom: 8px; letter-spacing: -.01em;

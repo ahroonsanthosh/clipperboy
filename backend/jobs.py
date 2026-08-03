@@ -44,6 +44,7 @@ class Clip:
     transcript: str
     aspect: str
     captions: bool = True
+    quality: str = config.DEFAULT_QUALITY
     crop_mode: str = ""
     faces_found: int = 0
     video: str = ""
@@ -73,6 +74,7 @@ class Job:
     clip_count: int = config.DEFAULT_CLIP_COUNT
     captions: bool = True
     speed: str = config.DEFAULT_SPEED
+    quality: str = config.DEFAULT_QUALITY
     clips: list[Clip] = field(default_factory=list)
     transcript_available: bool = False
 
@@ -136,7 +138,8 @@ class JobStore:
 
     # --- accessors -----------------------------------------------------
     def create(self, filename: str, aspect: str, clip_count: int,
-               captions: bool = True, speed: str = config.DEFAULT_SPEED) -> Job:
+               captions: bool = True, speed: str = config.DEFAULT_SPEED,
+               quality: str = config.DEFAULT_QUALITY) -> Job:
         job = Job(
             id=uuid.uuid4().hex[:12],
             filename=filename,
@@ -145,6 +148,7 @@ class JobStore:
             clip_count=clip_count,
             captions=captions,
             speed=speed,
+            quality=quality,
         )
         with self._lock:
             self._jobs[job.id] = job
@@ -275,7 +279,7 @@ def process(job_id: str, source_path: Path, compress_mode: str) -> None:
                 start=round(c.start, 2), end=round(c.end, 2), duration=round(c.duration, 2),
                 score=round(c.score, 2), reasons=c.reasons, keywords=c.keywords,
                 features=c.features, transcript=c.text, aspect=job.aspect,
-                captions=job.captions,
+                captions=job.captions, quality=job.quality,
             )
             for i, c in enumerate(candidates)
         ]
@@ -312,6 +316,7 @@ def process(job_id: str, source_path: Path, compress_mode: str) -> None:
                     # and upscaling the result was the single biggest quality
                     # loss in the pipeline.
                     original=source_path,
+                    quality=clip.quality,
                 )
                 clip.video = f"/api/jobs/{job.id}/clips/{clip.id}/video"
                 clip.thumbnail = f"/api/jobs/{job.id}/clips/{clip.id}/thumbnail"
@@ -413,6 +418,7 @@ def rerender_clip(job: Job, clip: Clip, aspect: str, burn_captions: bool = True)
             burn_captions=burn_captions,
             title=clip.title,
             original=original,
+            quality=clip.quality,
         )
         clip.aspect = aspect
         clip.captions = burn_captions

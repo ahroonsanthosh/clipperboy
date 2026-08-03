@@ -18,6 +18,7 @@
     compress: $("compress"),
     captions: $("captions"),
     speed: $("speed"),
+    quality: $("quality"),
 
     progressSection: $("progress-section"),
     progressHeading: $("progress-heading"),
@@ -263,6 +264,7 @@
     body.append("compress", el.compress.value);
     body.append("captions", el.captions.checked ? "true" : "false");
     body.append("speed", el.speed.value);
+    body.append("quality", el.quality.value);
 
     try {
       const { job } = await api("/api/jobs", { method: "POST", body });

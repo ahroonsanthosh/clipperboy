@@ -159,6 +159,7 @@ Set these as environment variables (or in `docker-compose.yml`):
 
 | Variable | Default | What it does |
 | --- | --- | --- |
+| `CLIPPERBOY_QUALITY` | `high` | Export quality: `balanced`, `high`, `maximum`. |
 | `CLIPPERBOY_SPEED` | `balanced` | Which Speed the upload form starts on: `fast`, `balanced`, `accurate`. |
 | `CLIPPERBOY_WHISPER_MODEL` | `base` | `tiny`, `base`, `small`, `medium`, `large-v3`. Bigger = more accurate, slower. |
 | `CLIPPERBOY_CLIP_COUNT` | `8` | Default number of clips to find. |
@@ -169,6 +170,28 @@ Set these as environment variables (or in `docker-compose.yml`):
 | `CLIPPERBOY_DATA` | `./data` | Where uploads, clips and models are stored. |
 | `CLIPPERBOY_USE_OLLAMA` | `auto` | `off` to disable the optional local-LLM title polish. |
 | `CLIPPERBOY_OLLAMA_MODEL` / `OLLAMA_HOST` | `llama3.2` / `http://127.0.0.1:11434` | Optional: if you run [Ollama](https://ollama.com), titles and summaries are written by a local model. Purely optional — it never blocks a run. |
+
+---
+
+## Export quality
+
+Measured on real footage against a lossless render of the same filter chain:
+
+| setting | x264 | SSIM | 40s clip | bitrate | encode |
+| --- | --- | --- | --- | --- | --- |
+| Balanced | faster / crf 18 | 0.99045 | 12 MB | ~5 Mbps | 14.9s |
+| **High** (default) | faster / crf 16 | **0.99200** | 18 MB | ~8 Mbps | 15.6s |
+| Maximum | faster / crf 12 | 0.99464 | 36 MB | ~15 Mbps | 16.3s |
+| *(old default)* | superfast / crf 20 | 0.99003 | 17 MB | ~7 Mbps | 9.6s |
+
+Two things worth knowing. `superfast` was wasting about half its bitrate — at
+the same file size, `faster` at crf 16 is measurably better, which is why the
+default changed. And on `faster` the encode time barely moves with crf, so
+**quality costs disk space, not minutes**.
+
+Slower presets were rejected on measurement: `medium`/16 scored 0.99206 against
+`faster`/16's 0.99200 for nine more seconds a clip, and `slow`/16 0.99218 for
+twenty-seven more. Neither is worth it.
 
 ---
 

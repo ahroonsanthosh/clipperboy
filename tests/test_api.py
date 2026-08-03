@@ -264,3 +264,26 @@ def test_speed_preset_picks_the_model(client, video_fixture, monkeypatch):
         assert used[-1] == expected == config.SPEED_PRESETS[choice]
 
     assert _upload(client, video_fixture, speed="ludicrous").status_code == 400
+
+
+def test_export_quality_changes_the_encode(client, video_fixture, tmp_path):
+    """The setting must actually reach ffmpeg — a quality control that changes
+    nothing is worse than none."""
+    from backend import config
+
+    sizes = {}
+    for choice in ("balanced", "maximum"):
+        res = _upload(client, video_fixture, quality=choice, clip_count="1", captions="false")
+        assert res.status_code == 201, res.text
+        job = client.get(f"/api/jobs/{res.json()['job']['id']}").json()["job"]
+        assert job["status"] == "done", job.get("error")
+        assert job["quality"] == choice
+        clip = job["clips"][0]
+        assert clip["status"] == "ready", clip.get("error")
+        assert clip["quality"] == choice
+        sizes[choice] = (config.CLIP_DIR / job["id"] / f"clip-{clip['id']}.mp4").stat().st_size
+
+    # maximum is a much lower crf, so it must produce a visibly bigger file.
+    assert sizes["maximum"] > sizes["balanced"] * 1.3, sizes
+
+    assert _upload(client, video_fixture, quality="pristine").status_code == 400

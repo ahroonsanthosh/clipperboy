@@ -24,6 +24,29 @@ SPEED_PRESETS = {
 }
 DEFAULT_SPEED = os.environ.get("CLIPPERBOY_SPEED", "balanced")
 
+# Export quality. Measured on real footage against a lossless render of the same
+# filter chain, so these compare like with like:
+#
+#   preset/crf        SSIM       size    encode   bitrate
+#   superfast/20   0.99003      17 MB      9.6s   ~7 Mbps   (the old default)
+#   faster/18      0.99045      12 MB     14.9s   ~5 Mbps
+#   faster/16      0.99200      18 MB     15.6s   ~8 Mbps   <- default now
+#   faster/14      0.99337      25 MB     15.7s  ~11 Mbps
+#   faster/12      0.99464      36 MB     16.3s  ~15 Mbps
+#
+# Two things fall out of that. "superfast" wasted about half its bitrate: at the
+# SAME file size, "faster" at crf 16 is measurably better. And on "faster",
+# encode time is flat across crf — quality costs file size, not minutes — so
+# there is no reason to be stingy. Slower presets were rejected: medium/16
+# scored 0.99206 against faster/16's 0.99200 for 9 more seconds a clip, and
+# slow/16 0.99218 for 27 more.
+QUALITY_PRESETS = {
+    "balanced": ("faster", 18),
+    "high": ("faster", 16),
+    "maximum": ("faster", 12),
+}
+DEFAULT_QUALITY = os.environ.get("CLIPPERBOY_QUALITY", "high")
+
 # The uploaded episode is kept after a job so clips can be re-exported in another
 # shape without re-uploading. That is a full copy of every podcast you process,
 # so it can be turned off — re-export then needs a fresh upload.
