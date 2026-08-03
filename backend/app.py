@@ -66,6 +66,7 @@ def health() -> dict:
         "max_clip_seconds": config.MAX_CLIP_SEC,
         "ram_gb": config.TOTAL_RAM_GB,
         "whisper_batch_size": config.WHISPER_BATCH_SIZE,
+        "speeds": config.SPEED_PRESETS,
     }
 
 
@@ -76,11 +77,14 @@ def create_job(
     clip_count: int = Form(config.DEFAULT_CLIP_COUNT),
     compress: str = Form("auto"),
     captions: bool = Form(True),
+    speed: str = Form(config.DEFAULT_SPEED),
 ) -> JSONResponse:
     if aspect not in config.ASPECTS:
         raise HTTPException(400, f"Unsupported aspect ratio. Choose one of {list(config.ASPECTS)}.")
     if compress not in {"auto", "always", "never"}:
         raise HTTPException(400, "compress must be auto, always or never")
+    if speed not in config.SPEED_PRESETS:
+        raise HTTPException(400, f"speed must be one of {list(config.SPEED_PRESETS)}")
     clip_count = max(1, min(20, int(clip_count)))
 
     suffix = Path(file.filename or "").suffix.lower()
@@ -91,7 +95,7 @@ def create_job(
             f"file such as .mp4, .mov, .mp3 or .m4a.",
         )
 
-    job = jobs.STORE.create(file.filename or "episode", aspect, clip_count, captions)
+    job = jobs.STORE.create(file.filename or "episode", aspect, clip_count, captions, speed)
     dest = config.UPLOAD_DIR / f"{job.id}{suffix}"
     try:
         with dest.open("wb") as out:

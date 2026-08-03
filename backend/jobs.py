@@ -72,6 +72,7 @@ class Job:
     aspect: str = config.DEFAULT_ASPECT
     clip_count: int = config.DEFAULT_CLIP_COUNT
     captions: bool = True
+    speed: str = config.DEFAULT_SPEED
     clips: list[Clip] = field(default_factory=list)
     transcript_available: bool = False
 
@@ -135,7 +136,7 @@ class JobStore:
 
     # --- accessors -----------------------------------------------------
     def create(self, filename: str, aspect: str, clip_count: int,
-               captions: bool = True) -> Job:
+               captions: bool = True, speed: str = config.DEFAULT_SPEED) -> Job:
         job = Job(
             id=uuid.uuid4().hex[:12],
             filename=filename,
@@ -143,6 +144,7 @@ class JobStore:
             aspect=aspect,
             clip_count=clip_count,
             captions=captions,
+            speed=speed,
         )
         with self._lock:
             self._jobs[job.id] = job
@@ -249,7 +251,8 @@ def process(job_id: str, source_path: Path, compress_mode: str) -> None:
         def on_transcribe(frac: float, msg: str) -> None:
             _set_stage(job, "transcribe", lo + (hi - lo) * frac, msg)
 
-        tr: Transcript = transcribe(wav, info.duration, on_transcribe)
+        model_name = config.SPEED_PRESETS.get(job.speed, config.WHISPER_MODEL)
+        tr: Transcript = transcribe(wav, info.duration, on_transcribe, model_name=model_name)
         (clip_dir / "transcript.json").write_text(json.dumps(tr.to_dict()))
         job.transcript_available = True
         _set_stage(job, "transcribe", hi)

@@ -68,8 +68,9 @@ class ModelUnavailable(RuntimeError):
     pass
 
 
-def _load_model():
-    key = (config.WHISPER_MODEL, config.WHISPER_DEVICE, config.WHISPER_COMPUTE)
+def _load_model(model_name: str | None = None):
+    model_name = model_name or config.WHISPER_MODEL
+    key = (model_name, config.WHISPER_DEVICE, config.WHISPER_COMPUTE)
     if key not in _MODEL_CACHE:
         from faster_whisper import WhisperModel
 
@@ -89,12 +90,12 @@ def _load_model():
             # machine, which leaves most of a bigger CPU idle.
             threads = 0 if device == "cuda" else (os.cpu_count() or 4)
             _MODEL_CACHE[key] = WhisperModel(
-                config.WHISPER_MODEL, device=device, compute_type=compute,
+                model_name, device=device, compute_type=compute,
                 cpu_threads=threads,
             )
         except Exception as exc:
             raise ModelUnavailable(
-                f"Could not load the '{config.WHISPER_MODEL}' speech model ({exc}). "
+                f"Could not load the '{model_name}' speech model ({exc}). "
                 "The first run downloads it from huggingface.co — check your internet "
                 "connection, or pre-download the model and point CLIPPERBOY_WHISPER_MODEL "
                 "at the local folder."
@@ -102,9 +103,10 @@ def _load_model():
     return _MODEL_CACHE[key]
 
 
-def transcribe(audio_path: Path, duration: float, progress=None) -> Transcript:
+def transcribe(audio_path: Path, duration: float, progress=None,
+               model_name: str | None = None) -> Transcript:
     """Word-level transcription. `progress(fraction, message)` is called as it goes."""
-    model = _load_model()
+    model = _load_model(model_name)
 
     # Shared settings. temperature=0 and no prompt conditioning matter for speed:
     # the default temperature ladder re-decodes any segment that trips Whisper's

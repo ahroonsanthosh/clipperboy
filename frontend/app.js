@@ -17,6 +17,7 @@
     clipCount: $("clip-count"),
     compress: $("compress"),
     captions: $("captions"),
+    speed: $("speed"),
 
     progressSection: $("progress-section"),
     progressHeading: $("progress-heading"),
@@ -61,6 +62,7 @@
   let lastSignature = "";
   let announcedDone = false;
   let pollFailures = 0;
+  let jobStartedAt = 0;
 
   // ---------- helpers ----------
   const fmtTime = (s) => {
@@ -260,12 +262,14 @@
     body.append("clip_count", el.clipCount.value);
     body.append("compress", el.compress.value);
     body.append("captions", el.captions.checked ? "true" : "false");
+    body.append("speed", el.speed.value);
 
     try {
       const { job } = await api("/api/jobs", { method: "POST", body });
       currentJobId = job.id;
       announcedDone = false;
       pollFailures = 0;
+      jobStartedAt = Date.now();
       lastSignature = "";
       el.uploadSection.hidden = true;
       el.progressSection.hidden = false;
@@ -366,12 +370,28 @@
     pollTimer = setTimeout(poll, delay);
   }
 
+  /** Time left, measured from this run's own rate rather than guessed from the
+      machine. Only shown once there's enough progress for it to mean anything. */
+  function etaText(job) {
+    if (!jobStartedAt || !job.progress || job.progress < 0.06) return "";
+    if (job.status === "done" || job.status === "failed") return "";
+    const elapsed = (Date.now() - jobStartedAt) / 1000;
+    const remaining = elapsed / job.progress - elapsed;
+    if (!isFinite(remaining) || remaining < 20) return "";
+    const mins = Math.round(remaining / 60);
+    return mins < 1 ? "under a minute left"
+         : mins === 1 ? "about a minute left"
+         : `about ${mins} minutes left`;
+  }
+
   function renderProgress(job) {
     const pct = Math.round((job.progress || 0) * 100);
     el.progressBar.style.width = `${pct}%`;
     el.progressBar.setAttribute("aria-valuenow", String(pct));
     el.progressPct.textContent = `${pct}%`;
-    el.progressMessage.textContent = job.message || job.stage_label || "Working…";
+    const eta = etaText(job);
+    el.progressMessage.textContent =
+      (job.message || job.stage_label || "Working…") + (eta ? ` · ${eta}` : "");
 
     const order = job.stages.map((s) => s.key);
     const activeIndex = order.indexOf(job.stage);

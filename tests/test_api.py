@@ -15,7 +15,7 @@ from backend.app import app
 @pytest.fixture
 def client(monkeypatch, fake_transcript):
     """A client whose jobs run synchronously and never touch a real model."""
-    def fake_transcribe(audio_path, duration, progress=None):
+    def fake_transcribe(audio_path, duration, progress=None, model_name=None):
         if progress:
             progress(0.5, "Transcribing… test")
         return fake_transcript(duration)
@@ -234,3 +234,33 @@ def test_captions_can_be_turned_off(client, video_fixture, tmp_path):
     # The sidecar subtitle file is still produced either way.
     srt = client.get(f"/api/jobs/{off_job['id']}/clips/{off_clip['id']}/subtitles")
     assert srt.status_code == 200 and "-->" in srt.text
+
+
+def test_speed_preset_picks_the_model(client, video_fixture, monkeypatch):
+    """Transcription dominates the wait, so the model choice is the user's."""
+    from backend import config, jobs
+
+    used = []
+
+    def spy(audio_path, duration, progress=None, model_name=None):
+        used.append(model_name)
+        return jobs.transcribe.__wrapped__(audio_path, duration, progress) \
+            if hasattr(jobs.transcribe, "__wrapped__") else _stub(duration)
+
+    def _stub(duration):
+        from backend.pipeline.transcribe import Segment, Transcript, Word
+        words = [Word(i * 0.5, i * 0.5 + 0.4, w)
+                 for i, w in enumerate("this is a complete sentence about focus and output today".split())]
+        return Transcript([Segment(0.0, 12.0, "This is a complete sentence about focus and output today.", words)],
+                          "en", duration)
+
+    monkeypatch.setattr(jobs, "transcribe", spy)
+
+    for choice, expected in (("fast", "tiny"), ("accurate", "small")):
+        res = _upload(client, video_fixture, speed=choice, clip_count="1")
+        assert res.status_code == 201, res.text
+        job = client.get(f"/api/jobs/{res.json()['job']['id']}").json()["job"]
+        assert job["speed"] == choice
+        assert used[-1] == expected == config.SPEED_PRESETS[choice]
+
+    assert _upload(client, video_fixture, speed="ludicrous").status_code == 400

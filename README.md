@@ -99,8 +99,18 @@ For a 60-minute episode, budget roughly **10–15 minutes** on a recent laptop.
 Transcription is now the bulk of that, and it's dramatically faster on a machine
 with an NVIDIA GPU — detected and used automatically.
 
-Want it faster still? Set `CLIPPERBOY_WHISPER_MODEL=tiny`, ask for fewer clips,
-or untick **Burn captions into the video**.
+**The Speed setting is the big lever.** Transcription is most of the wait, and
+it scales with model size:
+
+| Speed | Model | Relative to Balanced |
+| --- | --- | --- |
+| Fast | `tiny` | ~3× quicker, slightly rougher wording |
+| Balanced | `base` | the default |
+| Most accurate | `small` | ~2.5× slower |
+
+On a long episode, or on an older machine, start with **Fast**. The clip-finding
+and editing are unaffected — only how carefully the speech is transcribed.
+Asking for fewer clips and unticking **Burn captions into the video** also help.
 
 Earlier versions took 15–40 minutes. Most of that was a full re-encode of the
 whole episode that fired on any file over 800 MB — measured at ~22 minutes for a
@@ -117,6 +127,7 @@ Set these as environment variables (or in `docker-compose.yml`):
 
 | Variable | Default | What it does |
 | --- | --- | --- |
+| `CLIPPERBOY_SPEED` | `balanced` | Which Speed the upload form starts on: `fast`, `balanced`, `accurate`. |
 | `CLIPPERBOY_WHISPER_MODEL` | `base` | `tiny`, `base`, `small`, `medium`, `large-v3`. Bigger = more accurate, slower. |
 | `CLIPPERBOY_CLIP_COUNT` | `8` | Default number of clips to find. |
 | `CLIPPERBOY_ASPECT` | `9:16` | Default aspect ratio. |

@@ -13,6 +13,16 @@ for _d in (UPLOAD_DIR, WORK_DIR, CLIP_DIR):
 
 # Whisper. "base" is a good speed/accuracy tradeoff on CPU; override with env.
 WHISPER_MODEL = os.environ.get("CLIPPERBOY_WHISPER_MODEL", "base")
+
+# Transcription is the bulk of the wait, and model size is the biggest lever on
+# it, so the choice belongs to the person waiting rather than buried in an env
+# var. Roughly, relative to "balanced": fast ~3x quicker, accurate ~2.5x slower.
+SPEED_PRESETS = {
+    "fast": "tiny",
+    "balanced": WHISPER_MODEL,
+    "accurate": "small",
+}
+DEFAULT_SPEED = os.environ.get("CLIPPERBOY_SPEED", "balanced")
 WHISPER_DEVICE = os.environ.get("CLIPPERBOY_WHISPER_DEVICE", "auto")
 WHISPER_COMPUTE = os.environ.get("CLIPPERBOY_WHISPER_COMPUTE", "int8")
 
