@@ -114,12 +114,13 @@
               <div class="option colour-lavender">
                 <label for="compress">Shrink first</label>
                 <select id="compress" name="compress">
-                  <option value="auto" selected>Only above 1080p</option>
-                  <option value="always">Always</option>
+                  <option value="auto" selected>No — keep full quality</option>
+                  <option value="always">Yes, shrink to 1080p first</option>
                   <option value="never">Never</option>
                 </select>
-                <p class="option-hint">Recommended: 4K is scaled to 1080p, which speeds everything up.
-                  "Always" gives a smaller working file but re-encodes the whole episode first, so it is usually slower.</p>
+                <p class="option-hint">Clips are cut from your original footage, so 4K stays sharp.
+                  Shrinking first re-encodes the whole episode and makes clips softer — only worth
+                  it if you are short on disk space.</p>
               </div>
 
               <div class="option colour-grass">

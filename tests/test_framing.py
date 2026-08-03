@@ -13,9 +13,18 @@ from backend.pipeline import speaker
 from backend.pipeline.speaker import Face
 
 
+# Injected observations are placed on a fixed 2Hz timeline rather than on
+# speaker.SAMPLE_HZ. These tests assert behaviour in *seconds* — dwell times,
+# how long a turn lasts, which half of the clip the transcript covers — so
+# tying their timeline to a tunable sample rate would silently rewrite what
+# each case means the moment that rate changed. The planner only ever reads
+# `times`, so this exercises it exactly the same way.
+TEST_HZ = 2.0
+
+
 def _plan(monkeypatch, samples, times=None, words=None,
           src_w=1920, src_h=1080, ratio=9 / 16):
-    times = times or [i / speaker.SAMPLE_HZ for i in range(len(samples))]
+    times = times or [i / TEST_HZ for i in range(len(samples))]
     monkeypatch.setattr(speaker, "_sample_faces", lambda *a, **k: (times, samples))
     return speaker.plan_crop("ignored.mp4", 0.0, times[-1] + 1, src_w, src_h, ratio, words=words)
 
@@ -128,6 +137,137 @@ def test_a_single_frame_of_motion_cannot_cut_the_camera(monkeypatch):
         samples.append([_face(500, lip=9.0), _face(1500, lip=blip)])
     plan = _plan(monkeypatch, samples, words=[_Word(0.0, 40.0)])
     assert plan.switches == 0, f"a single spike moved the camera: {plan.keyframes}"
+
+
+# --- one person who moves is not two people ------------------------------
+
+def test_a_subject_who_shifts_seat_is_one_subject_not_two(monkeypatch):
+    """Measured on real footage: a speaker moved 320px — more than the 192px
+    merge radius — and split into two "subjects". The planner then locked onto
+    one of them and framed a window the speaker was not inside for five whole
+    seconds. Two positions never once seen in the same frame are one person."""
+    samples = [[_face(1500)] for _ in range(20)] + [[_face(1100)] for _ in range(40)]
+    assert len(speaker._cluster_subjects(samples, 1920, len(samples))) == 1
+
+    plan = _plan(monkeypatch, samples)
+    # It must not pick one position and abandon the other: the speaker has to be
+    # inside the frame in both halves of the clip.
+    def framed_at(t):
+        x = plan.keyframes[0][1]
+        for kt, kx in plan.keyframes:
+            if t >= kt:
+                x = kx
+        return x, x + plan.crop_w
+
+    for t, cx in ((1.0, 1500), (25.0, 1100)):
+        lo, hi = framed_at(t)
+        assert lo < cx < hi, f"at {t}s the frame {lo}..{hi} misses the speaker at {cx}"
+
+
+def test_two_people_detected_alternately_are_not_merged():
+    """Disjoint occupancy alone is not proof of one person. A detector that only
+    finds one of two guests per frame produces disjoint sample sets too — but
+    they alternate, over and over, instead of forming one run then another."""
+    samples = [[_face(500)] if i % 2 == 0 else [_face(1500)] for i in range(60)]
+    assert len(speaker._cluster_subjects(samples, 1920, len(samples))) == 2
+
+
+def test_a_moving_subject_reframes_as_a_cut_and_respects_dwell(monkeypatch):
+    """Re-centring is still a locked camera: instant cuts, never a glide, and
+    never more often than the dwell time allows."""
+    samples = []
+    for i in range(80):
+        samples.append([_face(600 + 900 * ((i // 4) % 2))])   # jumps every 2s
+    plan = _plan(monkeypatch, samples)
+
+    cut_times = [t for i, (t, x) in enumerate(plan.keyframes)
+                 if i and x != plan.keyframes[i - 1][1]]
+    for earlier, later in zip(cut_times, cut_times[1:]):
+        assert later - earlier >= speaker.MIN_DWELL_S - 1e-6
+    # Held positions, not a continuum of eased intermediates.
+    assert len({x for _t, x in plan.keyframes}) <= 3
+
+
+def test_a_subject_drifting_inside_the_frame_does_not_reframe(monkeypatch):
+    """Movement is not a reason to move the camera; leaving the frame is. A
+    subject wandering well inside the crop must leave it perfectly still."""
+    drift = [0, 20, 45, 60, 40, 15, -20, -45, -60, -30]
+    samples = [[_face(960 + drift[i % len(drift)])] for i in range(80)]
+    plan = _plan(monkeypatch, samples)
+    assert plan.switches == 0, f"drift inside the frame moved it: {plan.keyframes}"
+
+
+# --- dropout memory -------------------------------------------------------
+
+def test_a_short_dropout_is_bridged_but_a_long_one_is_not():
+    """A subject who was there a moment ago is still there — for a moment."""
+    times = [i / 2.0 for i in range(24)]
+    rows = [[_face(900)] for _ in range(24)]
+    for i in (5, 6):                       # 1.0s gap: bridged
+        rows[i] = []
+    for i in range(12, 20):                # 4.0s gap: too long to invent
+        rows[i] = []
+    filled = speaker._assign(rows, [900.0], times)
+
+    assert filled[5][0] is not None and filled[5][0].filled
+    assert all(filled[i][0] is None for i in range(12, 20))
+
+
+def test_a_bridged_dropout_never_counts_as_speech(monkeypatch):
+    """Inventing presence is defensible; inventing evidence of talking is not."""
+    times = [i / 2.0 for i in range(24)]
+    rows = [[_face(900, lip=5.0)] for _ in range(24)]
+    rows[5] = []
+    filled = speaker._assign(rows, [900.0], times)
+    assert filled[5][0].lip == 0.0
+    assert speaker._talking_signal(filled, 1)[5][0] == 0.0
+
+
+# --- active-speaker evidence ---------------------------------------------
+
+def test_keypoint_openness_beats_pixel_lip_motion_when_available():
+    """BlazeFace already returns a mouth centre and both eyes, so mouth-to-nose
+    over eye-separation is free. Each subject is scored against their own
+    median, since face proportions differ between people."""
+    quiet = [speaker.Face(cx=500.0, cy=500.0, w=200.0, h=240.0, lip=9.0, openness=1.0)]
+    talky = [speaker.Face(cx=500.0, cy=500.0, w=200.0, h=240.0, lip=9.0, openness=1.6)]
+    rows = [[quiet[0]]] * 8 + [[talky[0]]] * 2
+    sig = speaker._talking_signal(rows, 1)
+    assert sig[0][0] < sig[-1][0], "an open mouth did not outscore a closed one"
+    # The pixel signal is identical throughout, so it cannot be what decided it.
+    assert sig[0][0] != quiet[0].lip
+
+
+def test_weak_ambiguous_evidence_leaves_the_camera_where_it_is(monkeypatch):
+    """A wrong cut is far more visible than a missed one. A challenger that is
+    merely less silent than the incumbent must not be able to take the frame."""
+    samples = []
+    for i in range(60):
+        # Both barely register; the challenger leads by a wide *ratio* but by
+        # almost nothing in absolute terms.
+        samples.append([_face(500, lip=9.0 if i < 20 else 0.004),
+                        _face(1500, lip=0.001 if i < 20 else 0.010)])
+    plan = _plan(monkeypatch, samples, words=[_Word(0.0, 60.0)])
+    assert plan.switches == 0, f"noise moved the camera: {plan.keyframes}"
+
+
+def test_openness_is_read_from_the_six_blazeface_keypoints():
+    class _P:
+        def __init__(self, x, y):
+            self.x, self.y = x, y
+
+    class _LD:
+        # right eye, left eye, nose, mouth, and the two ear tragions
+        relative_keypoints = [_P(0.40, 0.50), _P(0.60, 0.50), _P(0.50, 0.55),
+                              _P(0.50, 0.65), _P(0.35, 0.52), _P(0.65, 0.52)]
+
+    # eyes 0.2 apart, mouth 0.1 below the nose, on a 1000x1000 frame.
+    assert speaker._openness(_LD(), 1000, 1000) == pytest.approx(0.5, abs=1e-6)
+
+    class _NoKeypoints:
+        relative_keypoints = []
+
+    assert speaker._openness(_NoKeypoints(), 1000, 1000) == 0.0
 
 
 # --- detector loading: concurrency and fallbacks --------------------------

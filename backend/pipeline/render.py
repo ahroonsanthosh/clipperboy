@@ -7,11 +7,23 @@ from pathlib import Path
 from backend import config
 from backend.pipeline import captions as captions_mod
 from backend.pipeline import speaker
+from backend.pipeline import media as media_mod
 from backend.pipeline.media import MediaInfo, run
 from backend.pipeline.transcribe import Word
 
 PAD_BEFORE = 0.25   # a breath of lead-in so the first word isn't clipped
 PAD_AFTER = 0.35
+
+# Sharpening to pay back an upscale. A 9:16 crop out of 1080p is only 608px
+# wide and has to reach 1080 — a 1.78x upscale no resampler can make crisp.
+# Amplitude 0.8/0.4 was chosen by looking at frames, not by maximising a
+# sharpness number: 1.0 and 1.2 score higher but put a visible bright rim
+# around dark-on-light text and around hair against a pale wall, which is
+# exactly the artefact that makes a clip look cheap.
+UNSHARP = "unsharp=5:5:0.8:3:3:0.4"
+# Don't sharpen a downscale. Below this ratio the scale step is shrinking the
+# picture, which is already sharpening it; unsharp on top only adds ringing.
+UNSHARP_MIN_SCALE = 1.05
 
 
 @dataclass
@@ -91,6 +103,31 @@ def _write_title_card(title: str, path: Path, max_chars: int = 24) -> Path | Non
     return path
 
 
+def _best_source(source: Path, info: MediaInfo,
+                 original: Path | None = None) -> tuple[Path, MediaInfo]:
+    """Pick the file to render from, and the MediaInfo that describes *it*.
+
+    Prefers an explicitly supplied original, then one recorded by
+    `media.compress`. Falls back to `source` unless the candidate probes clean,
+    still has video, covers the same timeline (so timestamps still mean the
+    same thing) and is genuinely no smaller than what we were handed.
+    """
+    candidate = original or media_mod.origin_of(source)
+    if candidate is None or Path(candidate) == Path(source):
+        return source, info
+    try:
+        cand_info = media_mod.probe(Path(candidate))
+    except Exception:
+        return source, info
+    if not cand_info.has_video or not info.has_video:
+        return source, info
+    if abs(cand_info.duration - info.duration) > 1.0:
+        return source, info
+    if cand_info.width < info.width or cand_info.height < info.height:
+        return source, info
+    return Path(candidate), cand_info
+
+
 def render_clip(
     source: Path,
     info: MediaInfo,
@@ -104,9 +141,17 @@ def render_clip(
     work_dir: Path,
     burn_captions: bool = True,
     title: str = "",
+    original: Path | None = None,
 ) -> RenderResult:
     width, height = config.ASPECTS.get(aspect, config.ASPECTS[config.DEFAULT_ASPECT])
     target_ratio = width / height
+
+    # Always render from the highest-resolution copy we still have. `source`
+    # may be a downscaled working copy, and cropping 9:16 out of a downscale
+    # and upscaling the result is the single biggest quality loss in the
+    # pipeline. `info` must describe whatever we actually render, or the crop
+    # geometry silently refers to the wrong frame size.
+    source, info = _best_source(source, info, original)
 
     start = max(0.0, start - PAD_BEFORE)
     end = min(info.duration, end + PAD_AFTER)
@@ -140,6 +185,11 @@ def render_clip(
         # crf 19-23 (5.9s vs 5.6s), so quality here is essentially free — hence
         # crf 20 rather than 23. ultrafast is a false economy: it drops CABAC and
         # deblocking, which rings the burned-in caption edges.
+        # Going below crf 20 to pay for the sharpening filter was measured and
+        # rejected: on a real 1080x1920 clip crf 20 gives 6.5 Mbps, and crf 18
+        # costs 50% more bytes for +0.00002 SSIM. `-tune film` and `-tune grain`
+        # were both measured too — film is marginally *worse*, grain inflates
+        # the file by half. Neither is used.
         "-c:v", "libx264", "-preset", "superfast", "-crf", "20",
         "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.1",
         # A keyframe every 2 seconds: what the platforms' own re-encoders expect,
@@ -167,14 +217,20 @@ def render_clip(
                     f"crop={active.crop_w}:{active.crop_h}:"
                     f"x='{active.expression()}':y=(ih-oh)/2"
                 )
-            # A 9:16 crop out of 1080p is ~607px wide and has to be scaled up
-            # to 1080 — a 1.78x upscale, where the resampler visibly matters.
-            # Lanczos holds detail and caption edges far better than the default
-            # bicubic, at negligible cost.
+            # Lanczos holds detail and caption edges far better than the
+            # default bicubic, at negligible cost.
             chain.append(
                 f"scale={width}:{height}:force_original_aspect_ratio=increase"
                 f":flags=lanczos,crop={width}:{height}"
             )
+            src_w = active.crop_w if active.mode != "full-frame" else info.width
+            src_h = active.crop_h if active.mode != "full-frame" else info.height
+            factor = max(width / max(1, src_w), height / max(1, src_h))
+            if factor >= UNSHARP_MIN_SCALE:
+                # Note the ordering: sharpening goes *before* the captions are
+                # burned in, so our own text is composited crisp at full size
+                # and never picks up ringing from the filter.
+                chain.append(UNSHARP)
             chain.append("setsar=1")
             if burn_captions and clip_words:
                 chain.append(_subtitles_filter(ass_path))

@@ -47,18 +47,57 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-SAMPLE_HZ = 2.0          # face lookups per second of clip
+# Detection used to cost 67-90ms a frame (the Haar ladder), which is what set
+# this at 2Hz. BlazeFace is ~6ms, so the sample rate is now bounded by *decode*,
+# not detection: measured on a 40s 1080p clip, plan_crop was 2.03s at 2Hz and
+# 2.75s at 4Hz. 4Hz halves the blind window around a missed detection and gives
+# the switch logic twice the evidence, which is worth the 0.7s.
+SAMPLE_HZ = 4.0          # face lookups per second of clip
 
 # --- locked-camera behaviour ---------------------------------------------
 MIN_DWELL_S = 2.0        # camera may not move again within this long
-SWITCH_EVIDENCE_S = 0.9  # candidate must lead for this long before we cut
-SWITCH_MARGIN = 0.35     # ...and lead by this fraction more evidence
+SWITCH_EVIDENCE_S = 1.2  # candidate must lead for this long before we cut
+SWITCH_MARGIN = 0.60     # ...and lead by this fraction more evidence
+# ...and its evidence must be strong in absolute terms too, not merely larger
+# than an incumbent who happens to be scoring nothing. Expressed as a fraction
+# of this clip's own 90th-percentile evidence so it is scale-free across the two
+# very different lip signals below.
+SWITCH_FLOOR_FRAC = 0.35
 MIN_SWITCH_PX_FRAC = 0.04  # a "switch" closer than this to the current x is a no-op
+
+# --- reframing within one subject ----------------------------------------
+# A locked camera is not a camera that ignores its subject. When the person we
+# are framing moves far enough that they approach the edge of the crop — leaning
+# out, shifting seat, or the source itself reframing — holding position is not
+# "stable", it is losing them. So the frame may re-centre, but only as another
+# hard cut, under the same dwell rule as a speaker change, and only once the
+# subject has been that far off for a sustained stretch.
+REFRAME_TOL_FRAC = 0.22   # subject may sit this far from frame centre, as a
+                          # fraction of the crop width, before we re-centre
+# ...and must be out there this long. Shorter than SWITCH_EVIDENCE_S on purpose:
+# a subject's *position* is measured directly and reliably, unlike the question
+# of who is speaking, so there is much less to be gained by waiting. Measured on
+# the reference clip, 1.0s left the speaker outside the frame for 1.3s after
+# they moved; 0.6s (still 2-3 samples) cuts that to 0.8s without any reframing
+# on jitter.
+REFRAME_EVIDENCE_S = 0.6
 
 # --- subject clustering ---------------------------------------------------
 CLUSTER_MERGE_FRAC = 0.10   # faces within 10% of frame width are the same subject
 MIN_SUBJECT_SUPPORT = 0.08  # a subject must appear in this fraction of samples
 MAX_SUBJECTS = 4
+# Two clusters that are NEVER seen in the same frame are, on a static wide
+# two-shot, one person who moved rather than two people. Merging them is what
+# stops the camera cutting between two positions that are really one guest.
+COOCCUR_TOL = 0.02          # allow this fraction of samples to overlap (a
+                            # detection straddling the boundary) and still merge
+
+# --- dropout memory -------------------------------------------------------
+# A subject who was there a moment ago is still there. Short gaps are bridged
+# with a synthetic observation so presence, clustering support and camera
+# position stay continuous; the synthetic face never carries speaking evidence.
+MAX_FILL_S = 1.5         # bridge gaps no longer than this
+FILL_AGREE_FRAC = 0.06   # ...and only when the positions either side agree
 
 # ffmpeg's expression parser rejects anything nested deeper than 100 levels, so
 # the camera path is emitted as a flat sum of gated terms and capped in length.
@@ -109,6 +148,11 @@ class Face:
     h: float
     lip: float = 0.0     # lip-motion energy, 0 when unmeasurable
     conf: float = 1.0    # detector confidence, 0-1 (Haar has none, so 1.0)
+    # Mouth-centre-to-nose distance over inter-eye distance, from BlazeFace's
+    # keypoints. 0 when there are none (the Haar path). Scale- and
+    # distance-invariant; a jaw that drops raises it.
+    openness: float = 0.0
+    filled: bool = False  # synthesised to bridge a dropout, not observed
 
     @property
     def area(self) -> float:
@@ -369,6 +413,36 @@ def _run_cascade(name: str, gray: np.ndarray, flip: bool) -> np.ndarray:
     return boxes
 
 
+# BlazeFace emits six keypoints per detection, in this fixed order. They cost
+# nothing extra — the network already produced them — and they are anchored to
+# anatomy rather than to a loose box, which is what makes them worth using.
+KP_RIGHT_EYE, KP_LEFT_EYE, KP_NOSE, KP_MOUTH = 0, 1, 2, 3
+
+
+def _openness(location_data, w: int, h: int) -> float:
+    """Mouth-to-nose distance normalised by inter-eye distance, or 0.0.
+
+    Dividing by the eye separation makes this independent of how far the subject
+    sits from the camera, so one subject's value is comparable across the clip.
+    It is *not* comparable between people (face proportions differ), which is why
+    the planner only ever uses each subject's deviation from their own baseline.
+    """
+    try:
+        kps = location_data.relative_keypoints
+    except AttributeError:                    # a detector without keypoints
+        return 0.0
+    if len(kps) <= KP_MOUTH:
+        return 0.0
+    pts = [(k.x * w, k.y * h) for k in kps]
+    eye = float(np.hypot(pts[KP_RIGHT_EYE][0] - pts[KP_LEFT_EYE][0],
+                         pts[KP_RIGHT_EYE][1] - pts[KP_LEFT_EYE][1]))
+    if eye < 2.0:
+        return 0.0
+    mouth = float(np.hypot(pts[KP_MOUTH][0] - pts[KP_NOSE][0],
+                           pts[KP_MOUTH][1] - pts[KP_NOSE][1]))
+    return mouth / eye
+
+
 class _Detector:
     """Finds people in one clip's worth of samples.
 
@@ -392,6 +466,9 @@ class _Detector:
         self.preferred: tuple[str, bool] | None = None
         self.samples_seen = 0
         self.confidences: list[float] = []   # per box from the last detect()
+        # Per box from the last detect(): mouth openness from BlazeFace's six
+        # keypoints, or 0.0 where there are none (every Haar box).
+        self.openness: list[float] = []
         self._preferred_body: tuple[str, bool] | None = None
         self._blaze = None
         module = _mediapipe()
@@ -423,7 +500,7 @@ class _Detector:
             return np.empty((0, 4), int)
 
         h, w = colour.shape[:2]
-        boxes, scores = [], []
+        boxes, scores, openness = [], [], []
         for det in (result.detections or ()):
             score = float(det.score[0]) if det.score else 0.0
             if score < FACE_MIN_CONF:
@@ -440,7 +517,9 @@ class _Detector:
                 continue
             boxes.append([int(x0), int(y0), int(x1 - x0), int(y1 - y0)])
             scores.append(score)
+            openness.append(_openness(det.location_data, w, h))
         self.confidences = scores
+        self.openness = openness
         return np.asarray(boxes, dtype=int).reshape(-1, 4)
 
     def detect(self, gray: np.ndarray,
@@ -454,6 +533,7 @@ class _Detector:
         """
         self.samples_seen += 1
         self.confidences = []
+        self.openness = []
 
         if self._blaze is not None and colour is not None:
             boxes = self._blazeface(colour)
@@ -474,6 +554,7 @@ class _Detector:
 
         def hit(boxes: np.ndarray, is_face: bool) -> tuple[np.ndarray, bool]:
             self.confidences = [HAAR_CONF] * len(boxes)
+            self.openness = [0.0] * len(boxes)     # Haar has no keypoints
             return boxes, is_face
 
         if self.preferred is not None and self.samples_seen > PROBE_SAMPLES:
@@ -606,9 +687,10 @@ def plan_crop(video: Path, start: float, end: float, src_w: int, src_h: int,
         return CropPlan(crop_w, crop_h, [(0.0, centre_default)], faces_found, "centred")
 
     speech = _speech_mask(times, words, start)
-    path = _decide_path(times, samples, subjects, speech)
+    rows = _assign(samples, subjects, times)
+    path = _decide_path(times, rows, subjects, speech)
 
-    keyframes = _to_keyframes(path, times, subjects, crop_w, max_x, src_w)
+    keyframes = _to_keyframes(path, times, rows, subjects, crop_w, max_x, src_w)
     if not keyframes:
         keyframes = [(0.0, centre_default)]
 
@@ -623,29 +705,33 @@ def _cluster_subjects(samples: list[list[Face]], src_w: int,
     A podcast is one or two people who do not move much; treating their whole
     scatter of detections as fixed positions is exactly what removes the drift.
     """
-    xs = sorted(f.cx for s in samples for f in s)
-    if not xs:
+    points = sorted(((f.cx, i) for i, s in enumerate(samples) for f in s),
+                    key=lambda p: p[0])
+    if not points:
         return []
+    xs = [x for x, _i in points]
 
     merge = max(24.0, src_w * CLUSTER_MERGE_FRAC)
-    groups: list[list[float]] = [[xs[0]]]
-    for x in xs[1:]:
-        if x - groups[-1][-1] <= merge:
-            groups[-1].append(x)
+    groups: list[list[int]] = [[0]]          # indices into `points`
+    for k in range(1, len(points)):
+        if xs[k] - xs[groups[-1][-1]] <= merge:
+            groups[-1].append(k)
         else:
-            groups.append([x])
+            groups.append([k])
 
     # One refinement pass: reassign each face to its nearest centroid, which
     # repairs the greedy chaining that a long tail of outliers can cause.
-    centroids = [float(np.median(g)) for g in groups]
+    centroids = [float(np.median([xs[k] for k in g])) for g in groups]
     for _ in range(2):
-        buckets: list[list[float]] = [[] for _ in centroids]
-        for x in xs:
-            j = int(np.argmin([abs(x - c) for c in centroids]))
-            buckets[j].append(x)
-        centroids = [float(np.median(b)) if b else centroids[i]
+        buckets: list[list[int]] = [[] for _ in centroids]
+        for k in range(len(points)):
+            j = int(np.argmin([abs(xs[k] - c) for c in centroids]))
+            buckets[j].append(k)
+        centroids = [float(np.median([xs[k] for k in b])) if b else centroids[i]
                      for i, b in enumerate(buckets)]
         groups = buckets
+
+    centroids, groups = _merge_never_cooccurring(centroids, groups, points, n_samples)
 
     floor = max(1, int(n_samples * MIN_SUBJECT_SUPPORT))
     kept = [(c, len(g)) for c, g in zip(centroids, groups) if len(g) >= floor]
@@ -654,6 +740,65 @@ def _cluster_subjects(samples: list[list[Face]], src_w: int,
     kept.sort(key=lambda cg: -cg[1])
     kept = kept[:MAX_SUBJECTS]
     return sorted(c for c, _n in kept)
+
+
+def _merge_never_cooccurring(centroids: list[float], groups: list[list[int]],
+                             points: list[tuple[float, int]], n_samples: int
+                             ) -> tuple[list[float], list[list[int]]]:
+    """Fold together adjacent clusters that never share a frame.
+
+    Two face positions seen in the *same* sample are unarguably two people. Two
+    positions that are never once seen together, on footage whose entire premise
+    is a fixed wide shot, are one person who leaned, turned or changed seat.
+    Measured on the reference clip, the speaker shifts 320px around 5s in — more
+    than the 192px merge radius — and split into two "subjects", after which the
+    planner locked onto one of them and framed a window that did not contain the
+    speaker at all for the first five seconds. This is what fixes that.
+
+    Only *adjacent* clusters merge, and a small overlap is tolerated so that a
+    single detection landing on the boundary does not veto the merge.
+    """
+    order = sorted(range(len(centroids)), key=lambda j: centroids[j])
+    occupancy = [{points[k][1] for k in groups[j]} for j in range(len(groups))]
+    slack = int(n_samples * COOCCUR_TOL)
+
+    merged_groups: list[list[int]] = []
+    merged_occ: list[set[int]] = []
+    for j in order:
+        if (merged_groups
+                and len(occupancy[j] & merged_occ[-1]) <= slack
+                and _one_move_apart(merged_occ[-1], occupancy[j])):
+            merged_groups[-1] = merged_groups[-1] + groups[j]
+            merged_occ[-1] = merged_occ[-1] | occupancy[j]
+        else:
+            merged_groups.append(list(groups[j]))
+            merged_occ.append(set(occupancy[j]))
+
+    # The centroid of a merged subject is only a nominal position — the camera
+    # takes its actual x from the per-sample detections — so the median of every
+    # member observation is the right summary.
+    out = [float(np.median([points[k][0] for k in g])) if g else 0.0
+           for g in merged_groups]
+    return out, merged_groups
+
+
+MAX_POSITION_CHANGES = 2   # A→B, or A→B→A. More than that is alternation.
+
+
+def _one_move_apart(a: set[int], b: set[int]) -> bool:
+    """Do these two occupancies look like one subject who changed position?
+
+    Disjointness alone is not enough. If a detector is only finding one of two
+    real people per frame, their samples are disjoint too — but they *alternate*,
+    over and over. A person who moved instead occupies one contiguous run of the
+    clip and then the other. So count how many times the timeline flips between
+    the two sets and refuse the merge if it flips more than twice.
+    """
+    if not a or not b:
+        return True
+    labelled = sorted([(i, 0) for i in a] + [(i, 1) for i in b])
+    changes = sum(1 for p, q in zip(labelled, labelled[1:]) if p[1] != q[1])
+    return changes <= MAX_POSITION_CHANGES
 
 
 def _speech_mask(times: list[float], words: Iterable | None,
@@ -675,8 +820,8 @@ def _speech_mask(times: list[float], words: Iterable | None,
     return mask
 
 
-def _assign(samples: list[list[Face]],
-            subjects: list[float]) -> list[list[Face | None]]:
+def _assign(samples: list[list[Face]], subjects: list[float],
+            times: list[float] | None = None) -> list[list[Face | None]]:
     """Nearest-subject assignment: per sample, the best face for each subject."""
     out: list[list[Face | None]] = []
     for faces in samples:
@@ -686,10 +831,93 @@ def _assign(samples: list[list[Face]],
             if row[j] is None or f.area * f.weight > row[j].area * row[j].weight:
                 row[j] = f
         out.append(row)
+    return _bridge_dropouts(out, times if times is not None else
+                            [i / SAMPLE_HZ for i in range(len(out))])
+
+
+def _bridge_dropouts(rows: list[list[Face | None]],
+                     times: list[float]) -> list[list[Face | None]]:
+    """Fill short detection gaps for a subject who was there either side.
+
+    BlazeFace drops a subject who turns away, looks down, laughs, or is briefly
+    occluded. Holding the camera through that is right, but treating those
+    samples as *absence* is not: it weakens the subject's clustering support and
+    its share of prominence exactly when nothing has actually changed.
+
+    A gap is bridged only when the subject is seen on both sides, the gap is
+    short, and the two positions agree — i.e. it really was the same stationary
+    person all along. The bridged observation is marked `filled` and carries no
+    lip evidence, so a dropout can never be read as speech. Longer dropouts, and
+    gaps that open or close the clip, are left empty: after a couple of seconds
+    of nothing we genuinely do not know, and inventing a subject there is how a
+    tracker ends up pointing at a wall.
+    """
+    n = len(rows)
+    if n < 3 or not times:
+        return rows
+    for j in range(len(rows[0]) if rows[0] else 0):
+        seen = [i for i in range(n) if rows[i][j] is not None]
+        for a, b in zip(seen, seen[1:]):
+            if b - a < 2:
+                continue
+            fa, fb = rows[a][j], rows[b][j]
+            if times[b] - times[a] > MAX_FILL_S:
+                continue
+            span = max(abs(fa.cx), abs(fb.cx), 1.0)
+            if abs(fa.cx - fb.cx) > max(24.0, span * FILL_AGREE_FRAC):
+                continue
+            for i in range(a + 1, b):
+                w = (times[i] - times[a]) / max(1e-6, times[b] - times[a])
+                rows[i][j] = Face(
+                    cx=fa.cx + (fb.cx - fa.cx) * w,
+                    cy=fa.cy + (fb.cy - fa.cy) * w,
+                    w=(fa.w + fb.w) / 2, h=(fa.h + fb.h) / 2,
+                    lip=0.0, conf=min(fa.conf, fb.conf), openness=0.0,
+                    filled=True)
+    return rows
+
+
+def _talking_signal(rows: list[list[Face | None]], k: int) -> np.ndarray:
+    """Per-sample, per-subject "this mouth is moving" score.
+
+    Two sources, in order of preference:
+
+    * **Keypoint openness.** BlazeFace already returns a mouth centre, a nose
+      tip and both eyes, so mouth-to-nose over eye-separation is free and is
+      anchored to the face rather than to a band of a loose box. Because face
+      proportions differ between people, only each subject's *deviation from
+      their own median* is used, so the values are comparable across subjects.
+      Measured against the audio envelope of the reference clip it correlates
+      +0.19, against +0.03 for the pixel-difference band — six times better, and
+      it removes the need for a second frame decode per sample.
+    * **Pixel-difference lip energy**, the previous measure, for the Haar
+      fallback and for any detection without keypoints.
+
+    Be clear about what this is: +0.19 is a weak correlation, and the same
+    measurement showed that on this footage neither signal separates speech from
+    silence by more than about 15%. Mouth movement is not speech; laughing,
+    chewing and yawning all score. It is used as a tiebreaker under a
+    deliberately high switching bar, never as a detector.
+    """
+    n = len(rows)
+    out = np.zeros((n, k), dtype=float)
+    for j in range(k):
+        opens = np.array([rows[i][j].openness if rows[i][j] is not None else 0.0
+                          for i in range(n)])
+        live = opens > 0
+        if live.sum() >= 4:
+            base = float(np.median(opens[live]))
+            if base > 1e-6:
+                out[live, j] = np.abs(opens[live] - base) / base
+                continue
+        for i in range(n):
+            f = rows[i][j]
+            if f is not None:
+                out[i, j] = f.lip
     return out
 
 
-def _decide_path(times: list[float], samples: list[list[Face]],
+def _decide_path(times: list[float], rows: list[list[Face | None]],
                  subjects: list[float], speech: list[bool]) -> list[int]:
     """Which subject index the camera is on, per sample.
 
@@ -698,10 +926,11 @@ def _decide_path(times: list[float], samples: list[list[Face]],
     sustained window AND the minimum dwell has elapsed. Everything smaller —
     detection jitter, a brief interjection, a nod — changes nothing at all.
     """
-    rows = _assign(samples, subjects)
     n = len(times)
     if len(subjects) == 1:
         return [0] * n
+
+    signal = _talking_signal(rows, len(subjects))
 
     # Per-sample evidence that subject j is talking.
     evidence = np.zeros((n, len(subjects)), dtype=float)
@@ -709,11 +938,11 @@ def _decide_path(times: list[float], samples: list[list[Face]],
         if not speech[i]:
             continue
         for j, f in enumerate(row):
-            if f is not None:
+            if f is not None and not f.filled:
                 # Scale the talking evidence by how sure we are this is even a
                 # face: a marginal detection should not be able to pull the
                 # camera off a confidently-detected subject.
-                evidence[i, j] = f.lip * f.weight
+                evidence[i, j] = signal[i, j] * f.weight
 
     # If lip motion carries no information at all, fall back to presence-weighted
     # prominence — which yields a single static shot rather than a moving one.
@@ -724,6 +953,17 @@ def _decide_path(times: list[float], samples: list[list[Face]],
                 if f is not None:
                     prominence[j] += f.area * f.weight
         return [int(np.argmax(prominence))] * n
+
+    # A wrong cut is far more visible than a missed one, so a challenger has to
+    # clear an absolute bar as well as beating the incumbent. Without it, an
+    # incumbent scoring almost nothing can be unseated by a challenger scoring
+    # almost nothing — the margin test is satisfied by noise alone.
+    nonzero = evidence[evidence > 0]
+    # The reference is a high percentile, not the median: it has to represent
+    # what this clip looks like when somebody is *definitely* talking. A median
+    # taken over a clip that is mostly quiet is itself near-noise, which would
+    # make the bar no bar at all.
+    floor = float(np.percentile(nonzero, 90)) * SWITCH_FLOOR_FRAC if nonzero.size else 0.0
 
     dt = (times[-1] - times[0]) / max(1, n - 1) if n > 1 else 1.0 / SAMPLE_HZ
     win = max(1, int(round(SWITCH_EVIDENCE_S / max(dt, 1e-3))))
@@ -756,6 +996,7 @@ def _decide_path(times: list[float], samples: list[list[Face]],
         if (best != active
                 and sustained
                 and window[best] > 0
+                and window[best] / len(block) >= floor
                 and window[best] >= window[active] * (1.0 + SWITCH_MARGIN)
                 and times[lo] - last_switch_t >= MIN_DWELL_S):
             # Backdate the cut to where the winning evidence began, so the frame
@@ -768,27 +1009,83 @@ def _decide_path(times: list[float], samples: list[list[Face]],
     return path
 
 
-def _to_keyframes(path: list[int], times: list[float], subjects: list[float],
+def _to_keyframes(path: list[int], times: list[float],
+                  rows: list[list[Face | None]], subjects: list[float],
                   crop_w: int, max_x: int, src_w: int) -> list[tuple[float, int]]:
     """Turn a per-sample subject path into a piecewise-constant camera path.
 
     One keyframe per shot — the x is held exactly, so ffmpeg's crop does not
-    move by a single pixel until the next cut.
+    move by a single pixel until the next cut. Two things can end a shot:
+
+    * the active subject changes, which is an immediate cut; or
+    * the active subject has drifted near the edge of the held frame and stayed
+      there. Then the frame re-centres on where they now actually are — again as
+      a cut, under the same dwell rule. This is the difference between a locked
+      camera and a camera that has lost its subject: on the reference clip the
+      speaker moves 320px at the 5s mark, and without this the first five
+      seconds framed a window the speaker was not inside.
+
+    The new position is the *median* of the recent observations rather than the
+    latest one, so a cut always lands on where the subject settled and never on
+    a single jittery detection.
     """
     if not path:
         return []
-    xs = [_subject_x(subjects[j], crop_w, max_x) for j in path]
-    threshold = max(2.0, src_w * MIN_SWITCH_PX_FRAC)
+    n = len(path)
 
-    keyframes: list[tuple[float, int]] = [(0.0, xs[0])]
-    current = xs[0]
-    for i in range(1, len(xs)):
-        if abs(xs[i] - current) < threshold:
+    # Where each subject actually is, per sample: the observation when there is
+    # one, otherwise the last thing we knew, otherwise the nominal centroid.
+    centres: list[float] = []
+    last_seen: dict[int, float] = {}
+    for i in range(n):
+        j = path[i]
+        f = rows[i][j] if i < len(rows) and j < len(rows[i]) else None
+        if f is not None:
+            last_seen[j] = f.cx
+        centres.append(last_seen.get(j, subjects[j]))
+
+    threshold = max(2.0, src_w * MIN_SWITCH_PX_FRAC)
+    tol = max(threshold, crop_w * REFRAME_TOL_FRAC)
+    dt = (times[-1] - times[0]) / max(1, n - 1) if n > 1 else 1.0 / SAMPLE_HZ
+    need = max(2, int(round(REFRAME_EVIDENCE_S / max(dt, 1e-3))))
+
+    def held_x(i: int) -> int:
+        lo = max(0, i - need + 1)
+        window = [centres[k] for k in range(lo, i + 1) if path[k] == path[i]]
+        return _subject_x(float(np.median(window or [centres[i]])), crop_w, max_x)
+
+    current = held_x(0)
+    keyframes: list[tuple[float, int]] = [(0.0, current)]
+    last_move_t = times[0] - MIN_DWELL_S
+    off_since: float | None = None
+
+    for i in range(1, n):
+        cut = None
+        if path[i] != path[i - 1]:
+            # A speaker change. _decide_path has already enforced dwell and
+            # evidence on this; the frame follows it immediately.
+            cut = held_x(i)
+            off_since = None
+        else:
+            # Still the same person — only re-centre if they have genuinely
+            # walked out towards the edge of the frame and stayed there.
+            if abs(centres[i] - (current + crop_w / 2)) > tol:
+                if off_since is None:
+                    off_since = times[i]
+                elif (times[i] - off_since >= REFRAME_EVIDENCE_S
+                        and times[i] - last_move_t >= MIN_DWELL_S):
+                    cut = held_x(i)
+                    off_since = None
+            else:
+                off_since = None
+
+        if cut is None or abs(cut - current) < threshold:
             continue
         # An instant cut, never an ease: a moving frame is the thing this
         # module exists to avoid.
-        keyframes.append((max(0.0, float(times[i])), xs[i]))
-        current = xs[i]
+        keyframes.append((max(0.0, float(times[i])), cut))
+        current = cut
+        last_move_t = times[i]
     return keyframes
 
 
@@ -852,9 +1149,14 @@ def _sample_faces(video: Path, start: float, duration: float
                 gray = cv2.cvtColor(colour, cv2.COLOR_BGR2GRAY)
                 boxes, is_face = detector.detect(gray, colour)
                 scores = list(detector.confidences)
+                opens = list(detector.openness)
 
+                # The second decode exists only to supply the pixel-difference
+                # lip signal. When every box came with keypoints, the openness
+                # measure replaces it and the decode is skipped — which is most
+                # of what pays for the higher sample rate.
                 later = None
-                if len(boxes):
+                if len(boxes) and not (opens and all(o > 0 for o in opens)):
                     for _ in range(lip_gap):
                         if not cap.grab():
                             break
@@ -875,6 +1177,7 @@ def _sample_faces(video: Path, start: float, duration: float
                         w=float(bw) * scale, h=float(bh) * scale,
                         lip=_lip_energy(gray, later, (bx, by, bw, bh)) if is_face else 0.0,
                         conf=float(scores[i]) if i < len(scores) else HAAR_CONF,
+                        openness=float(opens[i]) if i < len(opens) else 0.0,
                     ))
                 samples.append(faces)
             index += 1

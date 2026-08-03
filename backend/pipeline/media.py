@@ -79,22 +79,63 @@ def probe(path: Path) -> MediaInfo:
 def should_compress(info: MediaInfo, mode: str) -> bool:
     """mode: auto | always | never
 
-    On "auto" this only fires for above-1080p sources. Compressing purely
-    because a file is *large* is a bad trade: re-encoding a 60-minute episode
-    costs ~22 minutes, while the decode work it saves downstream — eight ~40s
-    windows — is under a minute. Downscaling a 4K source does pay for itself,
-    because every crop-plan and render pass then decodes a quarter of the pixels.
+    "auto" never compresses video, and that is deliberate.
+
+    The old rule downscaled anything above 1080p, on the theory that every
+    later pass then decodes a quarter of the pixels. But every later pass is
+    building a *vertical crop*: 9:16 out of a frame keeps only ~32% of its
+    width. Pre-downscaling a 4K episode to 1080p throws away three quarters of
+    the pixels and then the render upscales the 608px-wide survivor back to
+    1080 — measured at a fraction of the detail of cropping 1215x2160 straight
+    out of the original and scaling that *down* to 1080x1920. The decode time
+    saved is minutes; the quality lost is the entire product.
+
+    Compressing merely because a file is *large* was already a bad trade:
+    re-encoding a 60-minute episode costs ~22 minutes to save well under one.
+
+    "always" remains for people who genuinely need the disk back; renders still
+    prefer the original file when it is still on disk (see `record_origin`).
     """
     if mode == "never" or info.is_audio_only:
         return False
-    if mode == "always":
-        return True
-    return max(info.width, info.height) > 1920
+    return mode == "always"
+
+
+ORIGIN_SUFFIX = ".origin"
+
+
+def origin_sidecar(working: Path) -> Path:
+    return working.with_name(working.name + ORIGIN_SUFFIX)
+
+
+def record_origin(working: Path, original: Path) -> None:
+    """Note which file a working copy was derived from.
+
+    A working copy is a downscale, so anything that cares about picture quality
+    (i.e. the renderer) should go back to the original if it is still there.
+    """
+    try:
+        origin_sidecar(working).write_text(str(Path(original).resolve()), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def origin_of(working: Path) -> Path | None:
+    """The original this working copy came from, if it is still on disk."""
+    try:
+        text = origin_sidecar(working).read_text(encoding="utf-8").strip()
+    except (OSError, ValueError):
+        return None
+    if not text:
+        return None
+    candidate = Path(text)
+    return candidate if candidate.is_file() else None
 
 
 def compress(src: Path, dst: Path, progress=None) -> Path:
-    """Transcode to a 1080p-tall working copy. Keeps quality high enough for
-    vertical crops while cutting decode cost for the rest of the pipeline."""
+    """Transcode to a 1080p-tall working copy. Only used when the operator asks
+    for it explicitly — see `should_compress`. The provenance sidecar lets the
+    renderer keep using the full-resolution original for the actual clips."""
     cmd = [
         config.FFMPEG, "-y", "-i", str(src),
         "-vf", "scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease",
@@ -106,6 +147,7 @@ def compress(src: Path, dst: Path, progress=None) -> Path:
     if progress:
         progress("Compressing source video")
     run(cmd, "compression")
+    record_origin(dst, src)
     return dst
 
 

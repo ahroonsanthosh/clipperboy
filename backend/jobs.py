@@ -204,9 +204,9 @@ def _set_stage(job: Job, key: str, progress: float, message: str = "") -> None:
 # Fractions of overall progress owned by each stage.
 _SPAN = {
     "probe": (0.01, 0.03),
-    "compress": (0.03, 0.14),
-    "audio": (0.14, 0.18),
-    "transcribe": (0.18, 0.60),
+    "compress": (0.03, 0.05),
+    "audio": (0.05, 0.09),
+    "transcribe": (0.09, 0.60),
     "analyse": (0.60, 0.66),
     "render": (0.66, 1.00),
 }
@@ -307,6 +307,11 @@ def process(job_id: str, source_path: Path, compress_mode: str) -> None:
                     work_dir=work,
                     title=clip.title,
                     burn_captions=clip.captions,
+                    # Always crop from the full-resolution upload, never from a
+                    # downscaled working copy: cropping 9:16 out of a downscale
+                    # and upscaling the result was the single biggest quality
+                    # loss in the pipeline.
+                    original=source_path,
                 )
                 clip.video = f"/api/jobs/{job.id}/clips/{clip.id}/video"
                 clip.thumbnail = f"/api/jobs/{job.id}/clips/{clip.id}/thumbnail"
@@ -374,6 +379,7 @@ def _cleanup_work(job_id: str, keep_source: bool = True) -> None:
         for leftover in config.UPLOAD_DIR.glob(f"{job_id}.*"):
             leftover.unlink(missing_ok=True)
         (work / "source.mp4").unlink(missing_ok=True)
+        media.origin_sidecar(work / "source.mp4").unlink(missing_ok=True)
 
 
 def rerender_clip(job: Job, clip: Clip, aspect: str, burn_captions: bool = True) -> None:
@@ -390,6 +396,9 @@ def rerender_clip(job: Job, clip: Clip, aspect: str, burn_captions: bool = True)
 
     tr = Transcript.from_dict(json.loads((clip_dir / "transcript.json").read_text()))
     info = media.probe(source)
+    # Same rule on re-export: prefer the original upload over any working copy.
+    uploads = list(config.UPLOAD_DIR.glob(f"{job.id}.*"))
+    original = uploads[0] if uploads else None
 
     clip.status = "rendering"
     STORE.persist(job)
@@ -403,6 +412,7 @@ def rerender_clip(job: Job, clip: Clip, aspect: str, burn_captions: bool = True)
             work_dir=work,
             burn_captions=burn_captions,
             title=clip.title,
+            original=original,
         )
         clip.aspect = aspect
         clip.captions = burn_captions

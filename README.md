@@ -13,8 +13,9 @@ limits, nothing sent to a third party. Every component is free and open source.
 
 1. **Takes any podcast file** — video (`.mp4 .mov .mkv .webm .avi`) or audio-only
    (`.mp3 .m4a .wav .flac .ogg`).
-2. **Downscales the source** if it's above 1080p, so a 4K export doesn't slow the
-   rest of the pipeline down (automatic, or force it on/off).
+2. **Leaves the source at full resolution.** Clips are cropped straight out of
+   the original frame, never out of a downscaled copy — see *Why clips are
+   sharp* below. Compression is still available if you need the disk back.
 3. **Transcribes the whole episode** locally with OpenAI Whisper (via
    `faster-whisper`), down to word-level timings.
 4. **Finds the clip-worthy moments** by scoring every sentence-aligned window on
@@ -32,10 +33,35 @@ limits, nothing sent to a third party. Every component is free and open source.
 
 Audio is loudness-normalised to −14 LUFS so clips don't arrive quiet.
 
-**Export settings**: H.264 high profile, CRF 20, lanczos scaling, a keyframe
-every 2 seconds, AAC 192 kbps at 48 kHz, `+faststart`. The **source frame rate
-is preserved** rather than forced — resampling 25fps to 30 duplicates every
-fifth frame, which reads as judder on any movement.
+**Export settings**: H.264 high profile, CRF 20 (~6.5 Mbps on a 1080x1920 clip),
+lanczos scaling, a keyframe every 2 seconds, AAC 192 kbps at 48 kHz,
+`+faststart`. The **source frame rate is preserved** rather than forced —
+resampling 25fps to 30 duplicates every fifth frame, which reads as judder on
+any movement.
+
+### Why clips are sharp
+
+Two things used to make output look soft, and both are fixed.
+
+**The crop is taken from the original, not from a downscale.** The pipeline used
+to re-encode any above-1080p episode down to 1920x1080 first. A 4K clip then
+went 3840x2160 → 1920x1080 → crop 608x1080 → upscale to 1080x1920: three
+quarters of the pixels thrown away, and the remainder inflated. Cropping
+1215x2160 out of the 4K frame and scaling that *down* to 1080x1920 is a
+different picture entirely. Nothing is pre-downscaled now, and if you do ask for
+compression the renderer still reaches back to the original file when it's on
+disk.
+
+**Upscales are sharpened, downscales are not.** 9:16 out of a 1080p frame is
+only 608px wide and must be upscaled 1.78x; lanczos alone can't recover that, so
+an `unsharp=5:5:0.8:3:3:0.4` pass runs after the scale. Stronger settings score
+better on a sharpness metric but put a visible bright rim around dark-on-light
+text and around hair against a pale wall, so 0.8 is where it stops. Captions are
+burned in *after* the sharpening, so they're composited crisp and never ring.
+When the render is scaling down — a 4K source into 1080x1920 — no sharpening is
+applied at all, since it would only add ringing. CRF 18 and `-tune film`/`-tune
+grain` were measured for this chain and rejected: 50% more bytes, no measurable
+gain.
 
 ---
 
@@ -120,8 +146,8 @@ Asking for fewer clips and unticking **Burn captions into the video** also help.
 
 Earlier versions took 15–40 minutes. Most of that was a full re-encode of the
 whole episode that fired on any file over 800 MB — measured at ~22 minutes for a
-60-minute episode, to save under a minute of decoding later. It now only
-downscales genuinely oversized (above-1080p) sources. Crop planning was rebuilt
+60-minute episode, to save under a minute of decoding later. It no longer
+re-encodes the source at all unless you ask it to. Crop planning was rebuilt
 to walk each clip once instead of seeking per sample (14.8s → 2.8s per clip),
 clips render in parallel, and transcription uses batched inference.
 

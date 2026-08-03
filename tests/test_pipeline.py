@@ -57,12 +57,57 @@ def test_compress_decision(video_fixture: Path):
                                     size_bytes=3 * 1024 ** 3, duration=3600)
     assert media.should_compress(big_1080p, "auto") is False
 
-    # A 4K source is worth downscaling — every later pass decodes 4x the pixels.
+    # A 4K source must NOT be downscaled either. Every clip is a vertical crop
+    # of the frame, so pre-downscaling to 1080p discards exactly the pixels the
+    # crop was going to keep and forces the render to upscale what's left.
     uhd = dataclasses.replace(info, width=3840, height=2160)
-    assert media.should_compress(uhd, "auto") is True
+    assert media.should_compress(uhd, "auto") is False
 
     # Audio-only has no video to compress.
     assert media.should_compress(dataclasses.replace(info, has_video=False), "always") is False
+
+
+def test_compress_records_its_origin(video_fixture: Path, tmp_path):
+    """A working copy remembers where it came from, so the renderer can go back
+    to the full-resolution file instead of cropping a downscale."""
+    dst = tmp_path / "source.mp4"
+    media.compress(video_fixture, dst)
+    assert media.origin_of(dst) == video_fixture.resolve()
+
+    # Nothing recorded, or the original since deleted: no claim is made.
+    assert media.origin_of(tmp_path / "unrelated.mp4") is None
+    media.record_origin(dst, tmp_path / "gone.mp4")
+    assert media.origin_of(dst) is None
+
+
+def test_render_prefers_the_original_over_a_downscaled_copy(video_fixture: Path, tmp_path):
+    """The crop must be taken from the biggest frame available, and the
+    MediaInfo used for the crop maths must describe that same file."""
+    small = tmp_path / "small.mp4"
+    media.run([
+        "ffmpeg", "-y", "-i", str(video_fixture),
+        "-vf", "scale=640:360", "-c:v", "libx264", "-preset", "ultrafast",
+        "-crf", "30", str(small),
+    ], "downscale")
+    media.record_origin(small, video_fixture)
+    small_info = media.probe(small)
+
+    chosen, chosen_info = render._best_source(small, small_info)
+    assert chosen == video_fixture.resolve()
+    assert (chosen_info.width, chosen_info.height) == (small_info.width * 2,
+                                                       small_info.height * 2)
+
+    # An explicit original wins, and a bogus one is ignored rather than fatal.
+    assert render._best_source(small, small_info, video_fixture)[0] == video_fixture
+    assert render._best_source(small, small_info, tmp_path / "nope.mp4")[0] == small
+
+    # A candidate that is *smaller* than what we were handed is never used.
+    tiny = tmp_path / "tiny.mp4"
+    media.run([
+        "ffmpeg", "-y", "-i", str(small), "-vf", "scale=320:180",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30", str(tiny),
+    ], "downscale")
+    assert render._best_source(small, small_info, tiny)[0] == small
 
 
 # --- scoring -------------------------------------------------------------
