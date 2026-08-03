@@ -128,3 +128,82 @@ def test_a_single_frame_of_motion_cannot_cut_the_camera(monkeypatch):
         samples.append([_face(500, lip=9.0), _face(1500, lip=blip)])
     plan = _plan(monkeypatch, samples, words=[_Word(0.0, 40.0)])
     assert plan.switches == 0, f"a single spike moved the camera: {plan.keyframes}"
+
+
+# --- detector loading: concurrency and fallbacks --------------------------
+
+def test_mediapipe_import_is_locked_against_the_render_pool(monkeypatch):
+    """Clips are planned in parallel. Without a lock the thread that installs the
+    matplotlib stub wins and the rest silently fall back to Haar — measured at 7
+    of 8 clips on the first job of a fresh install."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    import time
+
+    calls = []
+
+    def slow_import():
+        calls.append(1)
+        time.sleep(0.25)     # a real mediapipe import is far slower than this
+        return object()
+
+    monkeypatch.setattr(speaker, "_mp_face_detection", None)
+    monkeypatch.setattr(speaker, "_import_mediapipe", slow_import)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _: speaker._mediapipe() is not None, range(8)))
+
+    assert len(calls) == 1, f"imported {len(calls)} times — the lock is not holding"
+    assert all(results), "some threads were denied the detector and fell back"
+
+
+def test_matplotlib_shim_is_reentrant_and_leaves_sys_modules_clean(monkeypatch):
+    """find_spec raises ValueError once a stub with no __spec__ is installed, so
+    a nested use must not try to install a second one."""
+    import sys
+
+    monkeypatch.delitem(sys.modules, "matplotlib", raising=False)
+    monkeypatch.delitem(sys.modules, "matplotlib.pyplot", raising=False)
+    monkeypatch.setattr(speaker.importlib.util, "find_spec", lambda name: None)
+
+    with speaker._without_matplotlib():
+        assert "matplotlib" in sys.modules
+        with speaker._without_matplotlib():        # must not raise
+            assert "matplotlib" in sys.modules
+
+    assert "matplotlib" not in sys.modules
+    assert "matplotlib.pyplot" not in sys.modules
+
+
+def test_a_broken_detector_never_fails_a_job(monkeypatch):
+    """Any import failure is a downgrade to Haar, never an exception."""
+    def explode():
+        raise RuntimeError("simulated broken install")
+
+    monkeypatch.setattr(speaker, "_mp_face_detection", None)
+    monkeypatch.setattr(speaker, "_import_mediapipe", explode)
+    try:
+        speaker._mediapipe()
+    except Exception as exc:                       # noqa: BLE001
+        raise AssertionError(f"detector failure escaped: {exc}") from exc
+
+
+def test_haar_cascades_are_per_thread(monkeypatch):
+    """cv2.CascadeClassifier carries detection state; sharing one across the
+    render pool returned 5 different crop positions for identical input."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    seen = []
+
+    def grab(_):
+        c = speaker._cascade("frontalface_alt2")
+        seen.append(id(c))
+        return id(c)
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        ids = list(pool.map(grab, range(4)))
+
+    assert len(set(ids)) == len(ids), "threads shared a cascade instance"
+    # ...but within one thread it is still cached rather than rebuilt each time.
+    assert speaker._cascade("frontalface_alt2") is speaker._cascade("frontalface_alt2")

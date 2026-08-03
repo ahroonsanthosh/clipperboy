@@ -26,7 +26,14 @@ if not exist .venv (
   python -m venv .venv
 )
 
-if not exist .venv\.installed-v2 (
+REM Reinstall whenever either requirements file changes, matching run.sh.
+for /f %%H in ('certutil -hashfile requirements.txt SHA256 ^| findstr /r "^[0-9a-f]"') do set REQ1=%%H
+for /f %%H in ('certutil -hashfile requirements-detect.txt SHA256 ^| findstr /r "^[0-9a-f]"') do set REQ2=%%H
+set WANT=%REQ1%%REQ2%
+set HAVE=
+if exist .venv\.installed-v2 set /p HAVE=<.venv\.installed-v2
+
+if not "%WANT%"=="%HAVE%" (
   echo Installing dependencies ^(a few minutes, first run only^)...
   .venv\Scripts\python -m pip install --quiet --upgrade pip
   .venv\Scripts\pip install --quiet -r requirements.txt
@@ -43,7 +50,7 @@ if not exist .venv\.installed-v2 (
     echo Clipperboy will still run, but vertical crops will be framed less
     echo accurately. Python 3.10-3.12 is needed for the better detector.
   )
-  echo done > .venv\.installed-v2
+  echo %WANT%> .venv\.installed-v2
 )
 
 echo.

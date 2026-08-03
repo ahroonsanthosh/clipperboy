@@ -1,4 +1,5 @@
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -11,6 +12,17 @@ sys.path.insert(0, str(ROOT))
 # before backend.config is imported anywhere.
 os.environ.setdefault("CLIPPERBOY_DATA", str(ROOT / "tests" / ".tmp-data"))
 os.environ.setdefault("CLIPPERBOY_USE_OLLAMA", "off")
+
+TMP_DATA = Path(os.environ["CLIPPERBOY_DATA"])
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _clean_tmp_data():
+    """Each full run renders real video; without this the directory grew to 12 GB
+    across runs and filled the disk."""
+    yield
+    if TMP_DATA.name == ".tmp-data" and TMP_DATA.exists():
+        shutil.rmtree(TMP_DATA, ignore_errors=True)
 
 FIXTURE_DIR = ROOT / "tests" / "fixtures"
 

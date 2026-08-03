@@ -23,6 +23,11 @@ SPEED_PRESETS = {
     "accurate": "small",
 }
 DEFAULT_SPEED = os.environ.get("CLIPPERBOY_SPEED", "balanced")
+
+# The uploaded episode is kept after a job so clips can be re-exported in another
+# shape without re-uploading. That is a full copy of every podcast you process,
+# so it can be turned off — re-export then needs a fresh upload.
+KEEP_SOURCE = os.environ.get("CLIPPERBOY_KEEP_SOURCE", "1") != "0"
 WHISPER_DEVICE = os.environ.get("CLIPPERBOY_WHISPER_DEVICE", "auto")
 WHISPER_COMPUTE = os.environ.get("CLIPPERBOY_WHISPER_COMPUTE", "int8")
 

@@ -35,6 +35,7 @@ import importlib.util
 import logging
 import os
 import sys
+import threading
 import types
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -53,8 +54,6 @@ MIN_DWELL_S = 2.0        # camera may not move again within this long
 SWITCH_EVIDENCE_S = 0.9  # candidate must lead for this long before we cut
 SWITCH_MARGIN = 0.35     # ...and lead by this fraction more evidence
 MIN_SWITCH_PX_FRAC = 0.04  # a "switch" closer than this to the current x is a no-op
-SWITCH_EASE_S = 0.0      # 0.0 = hard cut. >0 emits a short ease (kept under 0.4s)
-EASE_STEPS = 4
 
 # --- subject clustering ---------------------------------------------------
 CLUSTER_MERGE_FRAC = 0.10   # faces within 10% of frame width are the same subject
@@ -141,6 +140,7 @@ FACE_MIN_CONF = 0.45        # ...and below this we decline to plan a camera on i
 HAAR_CONF = 0.7
 
 _mp_face_detection = None   # None = not tried yet, False = unavailable
+_mp_lock = threading.Lock()
 
 
 @contextmanager
@@ -159,7 +159,9 @@ def _without_matplotlib():
     sys.modules exactly as it was found. If matplotlib *is* installed, this does
     nothing at all and the real one is used.
     """
-    if importlib.util.find_spec("matplotlib") is not None:
+    # `find_spec` raises ValueError when a stub is already in sys.modules with a
+    # None __spec__, so check sys.modules first and never nest a second stub.
+    if "matplotlib" in sys.modules or importlib.util.find_spec("matplotlib") is not None:
         yield
         return
     stub = types.ModuleType("matplotlib")
@@ -181,36 +183,67 @@ def _mediapipe():
     A missing or broken detector must never fail a job — the Haar ladder below
     still works, so an ImportError here is a downgrade, not an error.
     """
-    global _mp_face_detection, _mp_logged
+    global _mp_face_detection
+    # Clips are planned concurrently, so this must be locked. Without it the
+    # thread that installs the matplotlib stub wins and every other thread sees
+    # a half-built sys.modules, silently falling back to Haar — measured at 7 of
+    # 8 clips on the first job of a fresh install, which is exactly the run that
+    # matters most.
     if _mp_face_detection is None:
-        # mediapipe's absl/TF-Lite chatter goes to stderr at import and at every
-        # graph construction; it is noise in a user-facing terminal.
-        os.environ.setdefault("GLOG_minloglevel", "2")
-        os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
-        try:
-            with _without_matplotlib():
-                from mediapipe.python.solutions import face_detection
-            _mp_face_detection = face_detection
-            log.info("Face detection: MediaPipe BlazeFace (full-range).")
-        except Exception as exc:                      # noqa: BLE001 — any failure
-            _mp_face_detection = False
-            log.warning(
-                "Face detection: MediaPipe unavailable (%s: %s); "
-                "falling back to OpenCV Haar cascades, which frame less "
-                "accurately. Reinstall with: pip install --no-deps -r "
-                "requirements-detect.txt", type(exc).__name__, exc)
-        _mp_logged = True
+        with _mp_lock:
+            if _mp_face_detection is None:
+                try:
+                    _mp_face_detection = _import_mediapipe()
+                except Exception as exc:              # noqa: BLE001
+                    # _import_mediapipe guards its own body, but belt and braces:
+                    # nothing about loading a detector may ever fail a job.
+                    log.warning("Face detection: loader failed (%s); using Haar.", exc)
+                    _mp_face_detection = False
     return _mp_face_detection or None
 
 
-_cascades: dict[str, cv2.CascadeClassifier] = {}
+def _import_mediapipe():
+    # mediapipe's absl/TF-Lite chatter goes to stderr at import and at every
+    # graph construction; it is noise in a user-facing terminal.
+    os.environ.setdefault("GLOG_minloglevel", "2")
+    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+    os.environ.setdefault("GLOG_logtostderr", "0")
+    try:
+        with _without_matplotlib():
+            from mediapipe.python.solutions import face_detection
+        try:    # absl routes its own warnings past the GLOG env vars
+            from absl import logging as absl_logging
+
+            absl_logging.set_verbosity(absl_logging.ERROR)
+            absl_logging.use_absl_handler()
+        except Exception:                             # noqa: BLE001
+            pass
+        log.info("Face detection: MediaPipe BlazeFace (full-range).")
+        return face_detection
+    except Exception as exc:                          # noqa: BLE001 — any failure
+        log.warning(
+            "Face detection: MediaPipe unavailable (%s: %s); "
+            "falling back to OpenCV Haar cascades, which frame less "
+            "accurately. Reinstall with: pip install --no-deps -r "
+            "requirements-detect.txt", type(exc).__name__, exc)
+        return False
+
+
+# cv2.CascadeClassifier carries per-detection state, so sharing one across the
+# render pool corrupts results rather than merely slowing them: measured 6
+# concurrent plans returning 5 distinct crop positions, one 267px out, where
+# serial runs agreed exactly. Thread-local classifiers restore determinism.
+_cascade_store = threading.local()
 
 
 def _cascade(name: str) -> cv2.CascadeClassifier:
-    if name not in _cascades:
-        _cascades[name] = cv2.CascadeClassifier(
+    cache = getattr(_cascade_store, "cascades", None)
+    if cache is None:
+        cache = _cascade_store.cascades = {}
+    if name not in cache:
+        cache[name] = cv2.CascadeClassifier(
             str(Path(cv2.data.haarcascades) / f"haarcascade_{name}.xml"))
-    return _cascades[name]
+    return cache[name]
 
 
 DETECT_WIDTH = 640       # detect on a small copy; 6x fewer pixels to scan
@@ -752,18 +785,9 @@ def _to_keyframes(path: list[int], times: list[float], subjects: list[float],
     for i in range(1, len(xs)):
         if abs(xs[i] - current) < threshold:
             continue
-        t = max(0.0, float(times[i]))
-        if SWITCH_EASE_S > 0:
-            # A deliberate short move rather than a cut, still finishing well
-            # inside 0.4s and still piecewise-constant between steps.
-            span = min(SWITCH_EASE_S, 0.4)
-            for s in range(1, EASE_STEPS):
-                frac = s / EASE_STEPS
-                eased = 0.5 - 0.5 * np.cos(np.pi * frac)   # smoothstep
-                keyframes.append((t + span * frac,
-                                  int(round(current + (xs[i] - current) * eased))))
-            t = t + span
-        keyframes.append((t, xs[i]))
+        # An instant cut, never an ease: a moving frame is the thing this
+        # module exists to avoid.
+        keyframes.append((max(0.0, float(times[i])), xs[i]))
         current = xs[i]
     return keyframes
 

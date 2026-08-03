@@ -1,7 +1,9 @@
 FROM python:3.11-slim
 
-# ffmpeg does the editing; the DejaVu font renders the burned-in captions;
-# libGL/libglib are OpenCV's runtime deps for face detection.
+# ffmpeg does the editing; the DejaVu font renders the burned-in captions.
+# libgl1/libglib2.0-0 are kept for the wider OpenCV surface (VideoCapture codecs
+# and any non-headless wheel a user swaps in); the headless build itself does not
+# link them, and mediapipe vendors its own GLES.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         fonts-dejavu-core \

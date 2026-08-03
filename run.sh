@@ -38,7 +38,10 @@ fi
 if [ "$WANT" != "$HAVE" ]; then
   echo "→ Installing dependencies (a few minutes, first run only)…"
   ./.venv/bin/pip install --quiet --upgrade pip
-  ./.venv/bin/pip install --quiet -r requirements.txt
+  # --no-deps mediapipe makes pip's resolver report jax/jaxlib as missing on
+  # every later install. They are meant to be. Keep the check quiet.
+  ./.venv/bin/pip install --quiet --disable-pip-version-check -r requirements.txt 2>&1 \
+    | grep -v -e "dependency resolver" -e "mediapipe 0" -e "^$" || true
 
   # The face detector is installed separately and with --no-deps ON PURPOSE:
   # mediapipe declares opencv-contrib-python, which would replace the headless

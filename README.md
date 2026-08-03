@@ -192,19 +192,21 @@ display — breaking OpenCV on any server or container. Installing with
 `--no-deps` (66 MB, plus four small libraries pinned in the same file) avoids
 this entirely. **Do not add `mediapipe` to `requirements.txt`.**
 
-The detector is optional. If no wheel exists for your Python (it covers 3.9-3.12
+The detector is optional. If no wheel exists for your Python (it covers 3.10-3.12
 on Windows, macOS and Linux) or the install fails for any other reason, the app
 still runs: it logs one line and falls back to OpenCV's bundled Haar cascades,
 which frame noticeably less well. Both detectors are fully offline — BlazeFace's
 weights are inside the wheel, so nothing is ever downloaded.
 
-Measured on a real single-speaker podcast clip (52 samples, 1080x1920):
+Measured on a real single-speaker podcast clip (52 samples, 1080x1920). The
+per-frame figures are detection alone; the last column is the whole crop-planning
+pass on a 1080p landscape source, which also decodes the video:
 
 | detector | finds the face | wrong boxes | ms/frame | crop planning, 40s clip |
 |---|---|---|---|---|
-| BlazeFace (default) | 98% | 0 | 8 | 0.6s |
-| Haar cascades (fallback) | 20% | 0 | 155 | 12.4s |
-| Haar, before this change | 40% | 53% | 98 | 7.8s |
+| BlazeFace (default) | 98% | 0 | 8 | ~2.9s |
+| Haar cascades (fallback) | 20% | 0 | 155 | ~12s |
+| Haar, before this change | 40% | 53% | 98 | ~8s |
 
 The old ladder's "wrong boxes" were not noise: it locked onto a sponsor sign on
 the wall behind the speaker, which is why crops used to land on blank wall. Its

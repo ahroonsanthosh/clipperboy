@@ -368,6 +368,13 @@ def _cleanup_work(job_id: str, keep_source: bool = True) -> None:
         for tmp in work.glob(pattern):
             tmp.unlink(missing_ok=True)
 
+    if not config.KEEP_SOURCE:
+        # Drop the episode itself too. Clips, thumbnails, subtitles and the
+        # transcript all survive; only re-export needs the source back.
+        for leftover in config.UPLOAD_DIR.glob(f"{job_id}.*"):
+            leftover.unlink(missing_ok=True)
+        (work / "source.mp4").unlink(missing_ok=True)
+
 
 def rerender_clip(job: Job, clip: Clip, aspect: str, burn_captions: bool = True) -> None:
     """Re-export a single clip in a different aspect ratio."""
