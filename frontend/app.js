@@ -44,6 +44,14 @@
     dialogVideo: $("preview-video"),
     dialogCaption: $("preview-caption"),
     dialogClose: $("preview-close"),
+
+    marqueeTrack: $("marquee-track"),
+    navUpload: $("nav-upload"),
+    navProgress: $("nav-progress"),
+    navResults: $("nav-results"),
+    railNew: $("rail-new"),
+    stripPrev: $("strip-prev"),
+    stripNext: $("strip-next"),
   };
 
   let selectedFile = null;
@@ -111,6 +119,86 @@
       throw new Error(detail);
     }
     return res.json();
+  }
+
+  // ---------- chrome: rail + marquee ----------
+
+  /** The rail is the app's state display: the live step is a full colour block,
+      the ones you can't reach yet are outlined and disabled. */
+  function syncRail() {
+    const steps = [
+      [el.navUpload, el.uploadSection],
+      [el.navProgress, el.progressSection],
+      [el.navResults, el.resultsSection],
+    ];
+    // "current" = the furthest visible step, which is the one you're looking at.
+    let current = null;
+    steps.forEach(([, section]) => { if (!section.hidden) current = section; });
+    steps.forEach(([btn, section]) => {
+      btn.disabled = section.hidden;
+      if (section === current) btn.setAttribute("aria-current", "step");
+      else btn.removeAttribute("aria-current");
+    });
+  }
+
+  function focusSection(section, heading) {
+    if (section.hidden) return;
+    section.scrollIntoView({ block: "start" });
+    heading.focus();
+  }
+  el.navUpload.addEventListener("click", () => focusSection(el.uploadSection, document.getElementById("upload-heading")));
+  el.navProgress.addEventListener("click", () => focusSection(el.progressSection, el.progressHeading));
+  el.navResults.addEventListener("click", () => focusSection(el.resultsSection, el.resultsHeading));
+
+  /** The ticker says what the app is actually doing — never marketing filler.
+      It is aria-hidden; every fact in it is also in a live region or heading. */
+  function setMarquee(items) {
+    const list = items.filter(Boolean);
+    if (!list.length) return;
+    el.marqueeTrack.textContent = "";
+    // Two identical runs, so the -50% keyframe loops seamlessly.
+    for (let copy = 0; copy < 2; copy += 1) {
+      list.forEach((text, i) => {
+        const item = document.createElement("span");
+        item.textContent = text;
+        const sep = document.createElement("span");
+        sep.className = "sep";
+        sep.textContent = i % 2 ? "◆" : "⚡";
+        el.marqueeTrack.append(item, sep);
+      });
+    }
+  }
+
+  const IDLE_MARQUEE = [
+    "Local only — nothing leaves this computer",
+    "Whisper transcribes, FFmpeg edits",
+    "Drop an episode to begin",
+    "Vertical, square or wide",
+    "Word-by-word burned-in captions",
+  ];
+
+  function marqueeForJob(job) {
+    if (!job) return setMarquee(IDLE_MARQUEE);
+    const ready = job.clips.filter((c) => c.status === "ready").length;
+    if (job.status === "done") {
+      const shapes = [...new Set(job.clips.map((c) => c.aspect))].join(" / ");
+      return setMarquee([
+        `${ready} clip${ready === 1 ? "" : "s"} ready`,
+        job.filename,
+        `${fmtTime(job.duration)} episode`,
+        shapes ? `exported ${shapes}` : "",
+        "Download all as a zip",
+      ]);
+    }
+    if (job.status === "failed") {
+      return setMarquee([`${job.filename} stopped`, friendlyError(job.error), "Try another file"]);
+    }
+    return setMarquee([
+      `${job.stage_label}`,
+      job.message || "Working",
+      `${Math.round((job.progress || 0) * 100)}% through ${job.filename}`,
+      job.clips.length ? `${ready} of ${job.clips.length} clips cut` : "Looking for moments",
+    ]);
   }
 
   // ---------- file selection ----------
@@ -199,6 +287,13 @@
   });
 
   el.newUpload.addEventListener("click", resetToUpload);
+  el.railNew.addEventListener("click", resetToUpload);
+
+  // Horizontal filmstrip: buttons for the mouse, native arrow keys / scrollbar
+  // for the keyboard (the <ul> is a focusable region).
+  const stripStep = () => Math.max(240, Math.round(el.clipGrid.clientWidth * 0.8));
+  el.stripPrev.addEventListener("click", () => el.clipGrid.scrollBy({ left: -stripStep(), behavior: "smooth" }));
+  el.stripNext.addEventListener("click", () => el.clipGrid.scrollBy({ left: stripStep(), behavior: "smooth" }));
 
   function resetToUpload() {
     clearTimeout(pollTimer);
@@ -213,6 +308,9 @@
     el.uploadSection.hidden = false;
     el.progressSection.hidden = true;
     el.resultsSection.hidden = true;
+    lastSignature = "";
+    syncRail();
+    marqueeForJob(null);
     loadHistory();
     document.querySelector(".dropzone-browse").focus();
   }
@@ -268,6 +366,9 @@
       if (done) li.append(document.createTextNode(" (done)"));
       el.stageList.append(li);
     });
+
+    marqueeForJob(job);
+    syncRail();
   }
 
   // ---------- results ----------
@@ -285,9 +386,11 @@
         el.downloadAll.href = "#";
         el.downloadTranscript.hidden = !job.transcript_available;
       }
+      syncRail();
       return;
     }
     el.resultsSection.hidden = false;
+    syncRail();
 
     const signature = JSON.stringify(
       job.clips.map((c) => [c.id, c.status, c.aspect, c.title, c.error]));
@@ -312,11 +415,13 @@
     // yank the page out from under someone mid-read.
     const activeId = document.activeElement ? document.activeElement.id : "";
     const scrollY = window.scrollY;
+    const scrollX = el.clipGrid.scrollLeft;
     const open = new Set(
       [...el.clipGrid.querySelectorAll("details[open]")].map((d) => d.dataset.clip));
 
     el.clipGrid.innerHTML = "";
     job.clips.forEach((clip) => el.clipGrid.append(buildClipCard(job, clip, open)));
+    el.clipGrid.scrollLeft = scrollX;   // a background refresh must not rewind the strip
 
     if (activeId) {
       const restored = document.getElementById(activeId);
@@ -334,6 +439,8 @@
     li.className = "clip-card";
     const uid = `${job.id}-${clip.id}`;
 
+    // Every card gets a fixed-height header block whatever the clip's shape or
+    // state, so the strip never turns into a ragged row of odd heights.
     if (clip.status === "ready") {
       const thumbBtn = document.createElement("button");
       thumbBtn.type = "button";
@@ -344,21 +451,44 @@
       img.src = clip.thumbnail;
       img.alt = "";
       img.loading = "lazy";
+      const index = document.createElement("span");
+      index.className = "clip-index";
+      index.setAttribute("aria-hidden", "true");
+      index.textContent = String(clip.index).padStart(2, "0");
+      const aspect = document.createElement("span");
+      aspect.className = "clip-aspect";
+      aspect.setAttribute("aria-hidden", "true");
+      aspect.textContent = clip.aspect;
       const badge = document.createElement("span");
       badge.className = "play-badge";
       badge.setAttribute("aria-hidden", "true");
       badge.textContent = "▶";
-      thumbBtn.append(img, badge);
+      thumbBtn.append(img, index, aspect, badge);
       thumbBtn.addEventListener("click", () => openPreview(clip));
       li.append(thumbBtn);
+    } else {
+      const slab = document.createElement("div");
+      slab.className = `clip-slab is-${clip.status}`;
+      slab.setAttribute("aria-hidden", "true");
+      const slabIndex = document.createElement("span");
+      slabIndex.className = "clip-index";
+      slabIndex.textContent = String(clip.index).padStart(2, "0");
+      slab.append(slabIndex);
+      slab.append(
+        clip.status === "failed" ? "Didn't render"
+        : clip.status === "rendering" ? "Editing now…"
+        : "Queued");
+      li.append(slab);
     }
 
     const body = document.createElement("div");
     body.className = "clip-body";
+    const foot = document.createElement("div");
+    foot.className = "clip-foot";
 
     const h3 = document.createElement("h3");
     h3.className = "clip-title";
-    h3.textContent = `${clip.index}. ${clip.title}`;
+    h3.textContent = clip.title;   // the index lives in the badge on the poster
     body.append(h3);
 
     const meta = document.createElement("p");
@@ -400,7 +530,7 @@
       const ul = document.createElement("ul");
       ul.className = "chips";
       ul.setAttribute("aria-label", `Topics in clip ${clip.index}`);
-      clip.keywords.slice(0, 5).forEach((k) => {
+      clip.keywords.slice(0, 4).forEach((k) => {
         const chip = document.createElement("li");
         chip.className = "chip chip-key";
         chip.textContent = k;
@@ -425,7 +555,7 @@
       actions.className = "clip-actions";
 
       const dl = document.createElement("a");
-      dl.className = "btn btn-primary";
+      dl.className = "pillbtn";
       dl.id = `dl-${uid}`;
       dl.href = `${clip.video}?download=true`;
       dl.setAttribute("download", "");
@@ -433,15 +563,14 @@
       dl.setAttribute("aria-label", `Download clip ${clip.index}: ${clip.title}`);
 
       const srt = document.createElement("a");
-      srt.className = "btn btn-secondary";
+      srt.className = "pillbtn pillbtn-quiet";
       srt.href = clip.srt;
       srt.setAttribute("download", "");
       srt.textContent = "Subtitles";
       srt.setAttribute("aria-label", `Download the subtitle file for clip ${clip.index}`);
 
       actions.append(dl, srt);
-      body.append(actions);
-      body.append(buildReexport(job, clip, uid));
+      foot.append(actions, buildReexport(job, clip, uid));
     } else {
       const status = document.createElement("p");
       status.className = `clip-status is-${clip.status}`;
@@ -456,14 +585,19 @@
         const retry = document.createElement("button");
         retry.type = "button";
         retry.id = `retry-${uid}`;
-        retry.className = "btn btn-secondary";
+        retry.className = "pillbtn pillbtn-quiet";
         retry.textContent = "Try this clip again";
         retry.addEventListener("click", () => runRender(job, clip, clip.aspect, retry, "Trying again…"));
-        body.append(retry);
+        foot.append(retry);
       }
     }
 
     li.append(body);
+    if (foot.childElementCount) li.append(foot);
+    // Marked after layout: the fade is only honest when there is more to see.
+    requestAnimationFrame(() => {
+      body.classList.toggle("is-scrollable", body.scrollHeight > body.clientHeight + 2);
+    });
     return li;
   }
 
@@ -489,7 +623,7 @@
     const go = document.createElement("button");
     go.type = "button";
     go.id = `go-${uid}`;
-    go.className = "btn btn-secondary";
+    go.className = "pillbtn pillbtn-quiet";
     go.textContent = "Re-export";
 
     const status = document.createElement("span");
@@ -595,7 +729,7 @@
 
         const open = document.createElement("button");
         open.type = "button";
-        open.className = "btn btn-secondary";
+        open.className = "pillbtn pillbtn-quiet";
         open.textContent = "Open";
         open.setAttribute("aria-label", `Open ${job.filename}`);
         open.addEventListener("click", async () => {
@@ -617,7 +751,7 @@
 
         const del = document.createElement("button");
         del.type = "button";
-        del.className = "btn btn-quiet";
+        del.className = "pillbtn pillbtn-quiet";
         del.textContent = "Delete";
         del.setAttribute("aria-label", `Delete ${job.filename} and its clips`);
         del.addEventListener("click", async () => {
@@ -635,5 +769,7 @@
     }
   }
 
+  syncRail();
+  marqueeForJob(null);
   loadHistory();
 })();

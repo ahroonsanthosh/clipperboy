@@ -6,158 +6,244 @@
   <title>Clipperboy — turn a podcast into social clips</title>
   <meta name="description" content="Upload a full-length podcast and get vertical, captioned, speaker-tracked clips ready for Reels, TikTok and Shorts.">
   <link rel="stylesheet" href="styles.css">
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>✂️</text></svg>">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23EE4B2B'/><rect x='6' y='7' width='20' height='6' rx='3' fill='%230E0E0C'/><rect x='6' y='19' width='13' height='6' rx='3' fill='%230E0E0C'/></svg>">
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to main content</a>
 
-  <header class="site-header">
-    <div class="wrap header-inner">
-      <h1 class="logo"><span aria-hidden="true">✂️</span> Clipperboy</h1>
-      <p class="tagline">Upload a podcast. Get social-ready clips.</p>
+  <!-- FIXED LEFT RAIL -->
+  <aside class="rail" aria-label="Clipperboy">
+    <div class="rail-mark">
+      <span class="wordmark">clipperboy<span class="dot" aria-hidden="true">.</span></span>
+      <span class="wordmark-sub">Podcast → short clips</span>
     </div>
-  </header>
 
-  <main id="main" class="wrap">
+    <nav class="rail-steps" aria-label="Steps">
+      <button id="nav-upload" class="stepcard stepcard-1" type="button" data-step="upload">
+        <span class="stepcard-num">01</span>
+        <span class="stepcard-arrow" aria-hidden="true">↗</span>
+        <span class="stepcard-label">Episode</span>
+      </button>
+      <button id="nav-progress" class="stepcard stepcard-2" type="button" data-step="progress">
+        <span class="stepcard-num">02</span>
+        <span class="stepcard-arrow" aria-hidden="true">↗</span>
+        <span class="stepcard-label">Working</span>
+      </button>
+      <button id="nav-results" class="stepcard stepcard-3" type="button" data-step="results">
+        <span class="stepcard-num">03</span>
+        <span class="stepcard-arrow" aria-hidden="true">↗</span>
+        <span class="stepcard-label">Clips</span>
+      </button>
+    </nav>
+
+    <button id="rail-new" class="rail-cta" type="button">
+      New episode <span aria-hidden="true">↗</span>
+    </button>
+
+    <p class="rail-note">
+      Runs on this computer only. Whisper transcribes, FFmpeg edits.
+      Nothing is uploaded anywhere.
+    </p>
+  </aside>
+
+  <!-- TICKER -->
+  <div class="marquee" id="marquee">
+    <div class="marquee-track" id="marquee-track" aria-hidden="true"></div>
+  </div>
+
+  <main id="main" class="canvas">
 
     <!-- STEP 1 — UPLOAD -->
-    <section id="upload-section" aria-labelledby="upload-heading" class="panel">
-      <h2 id="upload-heading">Choose your episode</h2>
+    <section id="upload-section" aria-labelledby="upload-heading" class="step">
+      <div class="mosaic mosaic-upload">
 
-      <form id="upload-form">
-        <div id="dropzone" class="dropzone">
-          <span class="dropzone-icon" aria-hidden="true">🎙️</span>
-          <span class="dropzone-title">Drag &amp; drop your podcast here</span>
-          <label class="btn btn-secondary dropzone-browse" for="file-input" tabindex="0">
-            Browse your files
-          </label>
-          <!-- tabindex="-1": the styled label above is the visible, focusable
-               control; without this the input is an invisible extra tab stop. -->
-          <input id="file-input" class="file-input" type="file" tabindex="-1"
-                 aria-describedby="dropzone-hint"
-                 accept="video/*,audio/*,.mp4,.mov,.mkv,.webm,.avi,.m4v,.mp3,.m4a,.wav,.aac,.flac,.ogg,.opus">
-          <p id="dropzone-hint" class="hint">Video or audio — MP4, MOV, MKV, WEBM, MP3, M4A, WAV.
-            No size limit. Your file never leaves your computer.</p>
+        <div class="card card-paper card-intro">
+          <p class="pill">Step 01</p>
+          <h2 id="upload-heading" tabindex="-1" class="display">Turn an episode<br>into clips.</h2>
+          <p class="lede">Drop in a full-length recording. Clipperboy transcribes it, finds the
+            moments worth posting, and cuts each one to shape with captions burned in.</p>
+
+          <form id="upload-form">
+            <div id="dropzone" class="dropzone">
+              <span class="dropzone-title">Drag &amp; drop your podcast</span>
+              <label class="pillbtn dropzone-browse" for="file-input" tabindex="0">
+                Browse your files <span aria-hidden="true">↗</span>
+              </label>
+              <!-- tabindex="-1": the styled label above is the visible, focusable
+                   control; without this the input is an invisible extra tab stop. -->
+              <input id="file-input" class="file-input" type="file" tabindex="-1"
+                     aria-describedby="dropzone-hint"
+                     accept="video/*,audio/*,.mp4,.mov,.mkv,.webm,.avi,.m4v,.mp3,.m4a,.wav,.aac,.flac,.ogg,.opus">
+              <p id="dropzone-hint" class="hint">MP4, MOV, MKV, WEBM, MP3, M4A, WAV. No size limit.</p>
+            </div>
+
+            <p id="file-chosen" class="file-chosen" role="status" hidden></p>
+
+            <fieldset class="options">
+              <legend class="pill">Clip settings</legend>
+              <div class="options-grid">
+
+              <div class="option colour-cobalt">
+                <label for="aspect">Shape</label>
+                <select id="aspect" name="aspect">
+                  <option value="9:16" selected>Tall 9:16</option>
+                  <option value="1:1">Square 1:1</option>
+                  <option value="16:9">Wide 16:9</option>
+                </select>
+                <p class="option-hint">Reels and TikTok are tall, feed posts square, YouTube wide. Changeable per clip afterwards.</p>
+              </div>
+
+              <div class="option colour-marigold">
+                <label for="clip-count">How many</label>
+                <input id="clip-count" name="clip_count" type="number" min="1" max="20" value="8" inputmode="numeric">
+                <p class="option-hint">The best moments, spread across the episode.</p>
+              </div>
+
+              <div class="option colour-lavender">
+                <label for="compress">Shrink first</label>
+                <select id="compress" name="compress">
+                  <option value="auto" selected>Only above 1080p</option>
+                  <option value="always">Always</option>
+                  <option value="never">Never</option>
+                </select>
+                <p class="option-hint">Recommended: 4K is scaled to 1080p, which speeds everything up. "Always" makes a smaller working file but
+                  "Always" re-encodes the whole episode first and is usually slower.</p>
+              </div>
+
+              <div class="option colour-grass">
+                <span class="option-label">Captions</span>
+                <label class="checkbox" for="captions">
+                  <input id="captions" name="captions" type="checkbox" checked>
+                  <span>Burn captions into the video</span>
+                </label>
+                <p class="option-hint">Word-by-word, the style Reels and TikTok use. Off gives you
+                  clean footage — you get a subtitle file either way.</p>
+              </div>
+              </div>
+            </fieldset>
+
+            <button id="start-btn" class="pillbtn pillbtn-lg" type="submit">
+              Find my clips <span aria-hidden="true">↗</span>
+            </button>
+            <p id="start-hint" class="hint centre">Choose a file above to get started.</p>
+            <p id="upload-error" class="error-msg" role="alert" hidden></p>
+          </form>
         </div>
 
-        <p id="file-chosen" class="file-chosen" role="status" hidden></p>
-
-        <fieldset class="options">
-          <legend>Clip settings</legend>
-
-          <div class="option">
-            <label for="aspect">Shape of the clips</label>
-            <select id="aspect" name="aspect">
-              <option value="9:16" selected>Tall 9:16 — Reels, TikTok, Shorts</option>
-              <option value="1:1">Square 1:1 — feed posts</option>
-              <option value="16:9">Wide 16:9 — YouTube, landscape</option>
-            </select>
-            <p class="option-hint">You can change this per clip afterwards.</p>
+        <div class="sidestack">
+          <div class="card card-ink card-how">
+            <h3 class="card-h">How it works</h3>
+            <ol class="ruled-list">
+              <li><span>01</span> Reads the file and shrinks it if it's oversized</li>
+              <li><span>02</span> Transcribes every word, with timings</li>
+              <li><span>03</span> Scores the episode for clip-worthy moments</li>
+              <li><span>04</span> Crops to the speaker and burns in captions</li>
+            </ol>
           </div>
 
-          <div class="option">
-            <label for="clip-count">How many clips</label>
-            <input id="clip-count" name="clip_count" type="number" min="1" max="20" value="8" inputmode="numeric">
-            <p class="option-hint">The best moments, spread across the episode.</p>
+          <div class="card card-vermilion">
+            <h3 class="card-h">What comes out</h3>
+            <ul class="ruled-list">
+              <li>An MP4 per clip, cut to shape</li>
+              <li>A poster frame for each one</li>
+              <li>An .srt beside every clip</li>
+              <li>The full episode transcript</li>
+            </ul>
           </div>
 
-          <div class="option">
-            <label for="compress">Shrink the file first</label>
-            <select id="compress" name="compress">
-              <option value="auto" selected>Only if it's above 1080p (recommended)</option>
-              <option value="always">Always — smaller working file</option>
-              <option value="never">Never — keep full quality</option>
-            </select>
-            <p class="option-hint">4K footage is scaled to 1080p, which speeds everything
-              up. "Always" re-encodes the whole episode first and usually makes it slower.</p>
-          </div>
-
-          <div class="option">
-            <span class="option-label">Captions</span>
-            <label class="checkbox" for="captions">
-              <input id="captions" name="captions" type="checkbox" checked>
-              <span>Burn captions into the video</span>
-            </label>
-            <p class="option-hint">Word-by-word, the style Reels and TikTok use.
-              Turn off for clean footage — you still get a subtitle file either way.</p>
-          </div>
-        </fieldset>
-
-        <button id="start-btn" class="btn btn-primary btn-lg" type="submit">
-          Find my clips
-        </button>
-        <p id="start-hint" class="hint centre">Choose a file above to get started.</p>
-        <p id="upload-error" class="error-msg" role="alert" hidden></p>
-      </form>
+        </div>
+      </div>
     </section>
 
     <!-- STEP 2 — PROGRESS -->
-    <section id="progress-section" aria-labelledby="progress-heading" class="panel" hidden>
-      <h2 id="progress-heading" tabindex="-1">Working on it</h2>
+    <section id="progress-section" aria-labelledby="progress-heading" class="step" hidden>
+      <div class="mosaic mosaic-progress">
 
-      <p id="progress-file" class="progress-file"></p>
+        <div class="card card-marigold card-progress">
+          <p class="pill pill-ink">Step 02</p>
+          <h2 id="progress-heading" tabindex="-1" class="display">Working on it.</h2>
+          <p id="progress-file" class="progress-file"></p>
 
-      <div class="progress-track">
-        <div class="progress-bar-outer">
-          <div id="progress-bar" class="progress-bar-inner" role="progressbar"
-               aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"
-               aria-labelledby="progress-heading"></div>
+          <p id="progress-pct" class="progress-pct">0%</p>
+          <div class="progress-bar-outer">
+            <div id="progress-bar" class="progress-bar-inner" role="progressbar"
+                 aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"
+                 aria-labelledby="progress-heading"></div>
+          </div>
+
+          <p id="progress-message" class="progress-message" role="status" aria-live="polite">Starting…</p>
+
+          <button id="cancel-btn" class="pillbtn" type="button">Cancel and start over</button>
+          <p id="job-error" class="error-msg" role="alert" hidden></p>
         </div>
-        <span id="progress-pct" class="progress-pct">0%</span>
+
+        <div class="card card-ink card-stages">
+          <h3 class="card-h">Stages</h3>
+          <ol id="stage-list" class="stage-list"></ol>
+          <p class="hint">A 60-minute episode usually takes 10–20 minutes. Clips appear as soon as
+            each one is finished — leave this tab open.</p>
+        </div>
       </div>
-
-      <p id="progress-message" class="progress-message" role="status" aria-live="polite">Starting…</p>
-
-      <ol id="stage-list" class="stage-list"></ol>
-
-      <p class="hint">A 60-minute episode usually takes 15–40 minutes, depending on your computer.
-        Clips appear below as soon as each one is finished — you can keep using your computer,
-        just leave this tab open.</p>
-
-      <button id="cancel-btn" class="btn btn-quiet" type="button">Cancel and start over</button>
-      <p id="job-error" class="error-msg" role="alert" hidden></p>
     </section>
 
     <!-- STEP 3 — RESULTS -->
-    <section id="results-section" aria-labelledby="results-heading" class="panel" hidden>
-      <div class="results-head">
-        <div>
-          <h2 id="results-heading" tabindex="-1">Your clips</h2>
-          <p id="results-summary" class="results-summary"></p>
-        </div>
-        <div class="results-actions">
-          <a id="download-all" class="btn btn-primary" href="#" download>Download all clips (.zip)</a>
-          <a id="download-transcript" class="btn btn-secondary" href="#" download>Full transcript</a>
-          <button id="new-upload" class="btn btn-secondary" type="button">New episode</button>
+    <section id="results-section" aria-labelledby="results-heading" class="step" hidden>
+      <div class="card card-paper card-resultshead">
+        <div class="results-head">
+          <div>
+            <p class="pill">Step 03</p>
+            <h2 id="results-heading" tabindex="-1" class="display">Your clips.</h2>
+            <p id="results-summary" class="results-summary"></p>
+          </div>
+          <div class="results-actions">
+            <a id="download-all" class="pillbtn" href="#" download>Download all (.zip) <span aria-hidden="true">↗</span></a>
+            <a id="download-transcript" class="pillbtn pillbtn-quiet" href="#" download>Full transcript</a>
+            <button id="new-upload" class="pillbtn pillbtn-quiet" type="button">New episode</button>
+          </div>
         </div>
       </div>
 
-      <ul id="clip-grid" class="clip-grid"></ul>
+      <div class="filmstrip">
+        <div class="filmstrip-head">
+          <h3 class="filmstrip-title">Scroll sideways</h3>
+          <div class="filmstrip-nav">
+            <button id="strip-prev" class="arrowbtn" type="button" aria-label="Scroll clips left">
+              <span aria-hidden="true">←</span>
+            </button>
+            <button id="strip-next" class="arrowbtn" type="button" aria-label="Scroll clips right">
+              <span aria-hidden="true">→</span>
+            </button>
+          </div>
+        </div>
+        <ul id="clip-grid" class="clip-strip" tabindex="0" role="region"
+            aria-label="Finished clips, scrolls horizontally"></ul>
+      </div>
     </section>
 
     <!-- HISTORY -->
-    <section id="history-section" aria-labelledby="history-heading" class="panel panel-quiet" hidden>
-      <h2 id="history-heading">Earlier episodes</h2>
-      <ul id="history-list" class="history-list"></ul>
+    <section id="history-section" aria-labelledby="history-heading" class="step" hidden>
+      <div class="card card-paper">
+        <h2 id="history-heading" class="card-h">Earlier episodes</h2>
+        <ul id="history-list" class="history-list"></ul>
+      </div>
     </section>
 
+    <footer class="site-footer">
+      <p>Clipperboy — local, offline, no account.</p>
+    </footer>
   </main>
-
-  <footer class="site-footer">
-    <div class="wrap">
-      <p>Clipperboy runs entirely on your own computer — Whisper for transcription, FFmpeg for editing.
-         No account, no API key, nothing uploaded to anyone else.</p>
-    </div>
-  </footer>
 
   <!-- Clip preview dialog -->
   <dialog id="preview-dialog" class="preview-dialog" aria-labelledby="preview-title" tabindex="-1">
     <div class="preview-head">
       <h2 id="preview-title">Clip preview</h2>
-      <button id="preview-close" class="btn btn-quiet" type="button">Close</button>
+      <button id="preview-close" class="pillbtn pillbtn-quiet" type="button">Close</button>
     </div>
     <video id="preview-video" controls playsinline preload="metadata"></video>
     <p id="preview-caption" class="preview-caption"></p>
+    <h3 class="preview-subhead">What's said in this clip</h3>
+    <div id="preview-transcript" class="preview-transcript" tabindex="0" role="region"
+         aria-label="Transcript of this clip"></div>
   </dialog>
 
   <script src="app.js"></script>
