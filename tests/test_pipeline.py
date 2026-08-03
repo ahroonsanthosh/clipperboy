@@ -452,30 +452,70 @@ def test_face_sampling_walks_the_clip_once(video_fixture, monkeypatch):
     assert max(times) <= 20.5
 
 
-def test_detection_reports_centres_in_source_pixels(video_fixture):
+def test_detection_reports_centres_in_source_pixels(video_fixture, monkeypatch):
     """Detection runs on a 640px copy; the returned centre must be scaled back."""
-    import cv2
     import numpy as np
 
     frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
-    captured = {}
-    real = speaker._get_cascade().detectMultiScale
+    seen = {}
 
-    class Stub:
-        def detectMultiScale(self, img, **kw):
-            captured["width"] = img.shape[1]
-            captured["min_size"] = kw.get("minSize")
-            return np.array([[100, 50, 60, 60]])      # a face at x=100 on the small frame
+    def fake_run(name, gray, flip):
+        seen["width"] = gray.shape[1]
+        seen["name"] = name
+        return np.array([[100, 50, 60, 60]])      # a face at x=100 on the small frame
 
-    speaker._cascade = Stub()
-    try:
-        centre = speaker._detect_centre(frame)
-    finally:
-        speaker._cascade = None
+    monkeypatch.setattr(speaker, "_run_cascade", fake_run)
+    centre = speaker._detect_centre(frame)
 
-    assert captured["width"] == speaker.DETECT_WIDTH
-    assert captured["min_size"] == (speaker.MIN_FACE_PX, speaker.MIN_FACE_PX)
+    assert seen["width"] == speaker.DETECT_WIDTH
     assert centre == pytest.approx((100 + 30) * (1920 / 640))
+
+
+def test_detector_learns_which_cascade_suits_the_footage(monkeypatch):
+    """A full ladder pass is ~230ms; only the first samples may pay for it."""
+    import numpy as np
+
+    calls = []
+    winner = ("profileface", False)
+
+    def fake_run(name, gray, flip):
+        calls.append((name, flip))
+        if (name, flip) == winner:
+            return np.array([[10, 10, 50, 50]])
+        return np.empty((0, 4), int)
+
+    monkeypatch.setattr(speaker, "_run_cascade", fake_run)
+    det = speaker._Detector()
+    gray = np.zeros((360, 640), dtype=np.uint8)
+
+    for _ in range(speaker.PROBE_SAMPLES):
+        boxes, is_face = det.detect(gray)
+        assert len(boxes) and is_face
+    probe_calls = len(calls)
+    assert det.preferred == winner
+
+    calls.clear()
+    for _ in range(10):
+        assert len(det.detect(gray)[0])
+    assert len(calls) == 10, "the learned cascade should be tried alone"
+    assert set(calls) == {winner}
+    assert probe_calls > 10, "the probe phase is what pays for the search"
+
+
+def test_upper_body_never_becomes_the_preferred_detector(monkeypatch):
+    """Its box centre is the torso, so it must stay a last resort."""
+    import numpy as np
+
+    def fake_run(name, gray, flip):
+        return np.array([[10, 10, 80, 120]]) if name == "upperbody" else np.empty((0, 4), int)
+
+    monkeypatch.setattr(speaker, "_run_cascade", fake_run)
+    det = speaker._Detector()
+    boxes, is_face = det.detect(np.zeros((360, 640), dtype=np.uint8))
+
+    assert len(boxes) == 1
+    assert is_face is False
+    assert det.preferred is None
 
 
 def test_transcribe_falls_back_when_batching_is_unavailable(monkeypatch):

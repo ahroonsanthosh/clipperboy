@@ -21,8 +21,9 @@ limits, nothing sent to a third party. Every component is free and open source.
    hooks, questions, insights, emotion, storytelling, vocal energy and
    self-containment — then picking the best non-overlapping set. Sponsor reads,
    intros and outros are actively penalised.
-5. **Edits each clip**: crops to **9:16** with the speaker tracked by face
-   detection, and burns in **word-by-word captions** — kept inside the safe area
+5. **Edits each clip**: crops to **9:16** with the camera *locked* on the
+   speaker — still within a shot, hard-cutting when the speaker changes, never
+   drifting — using an adaptive ensemble of face detectors, and burns in **word-by-word captions** — kept inside the safe area
    so TikTok and Reels chrome never covers them. Audio-only episodes get an
    animated audiogram card with the clip title instead.
 6. **Shows you everything**: title, summary, why it was picked, topics, exact
