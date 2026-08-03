@@ -60,6 +60,7 @@
   let pollTimer = null;
   let lastSignature = "";
   let announcedDone = false;
+  let pollFailures = 0;
 
   // ---------- helpers ----------
   const fmtTime = (s) => {
@@ -264,6 +265,7 @@
       const { job } = await api("/api/jobs", { method: "POST", body });
       currentJobId = job.id;
       announcedDone = false;
+      pollFailures = 0;
       lastSignature = "";
       el.uploadSection.hidden = true;
       el.progressSection.hidden = false;
@@ -300,6 +302,7 @@
     clearTimeout(pollTimer);
     currentJobId = null;
     selectedFile = null;
+    pollFailures = 0;
     el.fileInput.value = "";
     el.fileChosen.hidden = true;
     el.startHint.hidden = false;
@@ -338,10 +341,29 @@
         loadHistory();
         return;
       }
+      // Contact is good — clear any earlier "can't reach" warning.
+      if (pollFailures) {
+        pollFailures = 0;
+        clearError(el.jobError);
+      }
     } catch (err) {
-      showError(el.jobError, `Lost contact with Clipperboy — is it still running? (${err.message})`);
+      pollFailures += 1;
+      // A single missed poll means nothing — a laptop waking, a browser
+      // throttling a background tab. Only say something once it persists.
+      if (pollFailures === 4) {
+        showError(el.jobError,
+          "Can't reach Clipperboy at the moment — still trying. Your episode keeps " +
+          "processing as long as the Clipperboy window is still open.");
+      } else if (pollFailures === 20) {
+        showError(el.jobError,
+          "Clipperboy still isn't responding. Check the window it started in: if it " +
+          "has closed or was stopped, reopen it and upload the episode again. If it " +
+          "is still running, leave this page open — it will reconnect on its own.");
+      }
     }
-    pollTimer = setTimeout(poll, 1500);
+    // Back off while unreachable so a stopped app isn't polled twice a second.
+    const delay = pollFailures > 4 ? Math.min(15000, 1500 * pollFailures) : 1500;
+    pollTimer = setTimeout(poll, delay);
   }
 
   function renderProgress(job) {

@@ -64,6 +64,8 @@ def health() -> dict:
         "aspects": list(config.ASPECTS),
         "default_aspect": config.DEFAULT_ASPECT,
         "max_clip_seconds": config.MAX_CLIP_SEC,
+        "ram_gb": config.TOTAL_RAM_GB,
+        "whisper_batch_size": config.WHISPER_BATCH_SIZE,
     }
 
 

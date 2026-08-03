@@ -29,7 +29,50 @@ DEFAULT_CLIP_COUNT = int(os.environ.get("CLIPPERBOY_CLIP_COUNT", 8))
 # Speech-to-text tuning. Batched inference is much faster and needs no extra
 # setup; it falls back to the sequential path automatically if unavailable.
 WHISPER_BATCHED = os.environ.get("CLIPPERBOY_WHISPER_BATCHED", "1") != "0"
-WHISPER_BATCH_SIZE = int(os.environ.get("CLIPPERBOY_WHISPER_BATCH", 8))
+
+
+def _total_ram_gb() -> float:
+    """Physical RAM in GB, or 0.0 if it can't be determined."""
+    try:
+        if hasattr(os, "sysconf") and "SC_PHYS_PAGES" in os.sysconf_names:
+            return os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") / 1024 ** 3
+        if os.name == "nt":
+            import ctypes
+
+            class _Status(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            status = _Status()
+            status.dwLength = ctypes.sizeof(_Status)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status))
+            return status.ullTotalPhys / 1024 ** 3
+    except Exception:
+        pass
+    return 0.0
+
+
+def _default_batch_size() -> int:
+    """Batching is a speed/memory trade. A long episode on a modest laptop can
+    be killed outright by the peak, and a job that dies at 35% is far worse than
+    one that runs a little slower — so size the batch to the machine."""
+    ram = _total_ram_gb()
+    if ram and ram < 6:
+        return 2
+    if ram and ram < 12:
+        return 4
+    return 8
+
+
+WHISPER_BATCH_SIZE = int(os.environ.get("CLIPPERBOY_WHISPER_BATCH", 0)) or _default_batch_size()
+TOTAL_RAM_GB = round(_total_ram_gb(), 1)
 
 # Captions use a bundled font so clips look identical on macOS, Windows and Linux.
 FONTS_DIR = ROOT / "assets" / "fonts"

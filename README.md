@@ -67,6 +67,12 @@ Docker, which needs neither.
 Either script creates a virtualenv and installs dependencies on first run, then
 serves the app at **<http://localhost:8000>**.
 
+> **A long episode needs headroom.** Transcription is memory-hungry, and an
+> hour-plus recording on a laptop with other apps open can be killed outright by
+> the operating system. Clipperboy sizes its batch to your RAM automatically; if
+> a long episode still dies partway, set `CLIPPERBOY_WHISPER_BATCHED=0` to use
+> the slower, leanest path. `/api/health` reports the RAM and batch size in use.
+
 > **The first upload pauses to download the speech model** (~150 MB for `base`)
 > from huggingface.co, and the progress bar sits on "Loading speech model" for a
 > few minutes while it does. It is cached in `./data/models` afterwards, and
@@ -116,7 +122,7 @@ Set these as environment variables (or in `docker-compose.yml`):
 | `CLIPPERBOY_ASPECT` | `9:16` | Default aspect ratio. |
 | `CLIPPERBOY_MIN_CLIP` / `CLIPPERBOY_MAX_CLIP` | `18` / `75` | Clip length bounds, in seconds. |
 | `CLIPPERBOY_WHISPER_BATCHED` | `1` | Batched transcription — much faster. `0` for the sequential path. |
-| `CLIPPERBOY_WHISPER_BATCH` | `8` | Batch size. 8 suits a CPU; try 16–24 on a GPU. |
+| `CLIPPERBOY_WHISPER_BATCH` | auto | Batch size, chosen from your RAM (2 under 6 GB, 4 under 12 GB, else 8). Raise it on a GPU; lower it if a long episode is being killed. |
 | `CLIPPERBOY_DATA` | `./data` | Where uploads, clips and models are stored. |
 | `CLIPPERBOY_USE_OLLAMA` | `auto` | `off` to disable the optional local-LLM title polish. |
 | `CLIPPERBOY_OLLAMA_MODEL` / `OLLAMA_HOST` | `llama3.2` / `http://127.0.0.1:11434` | Optional: if you run [Ollama](https://ollama.com), titles and summaries are written by a local model. Purely optional — it never blocks a run. |
