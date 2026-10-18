@@ -850,3 +850,25 @@ def test_interlaced_sources_are_detected(tmp_path):
         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(progressive),
     ], check=True, capture_output=True)
     assert media.probe(progressive).interlaced is False
+
+
+@pytest.mark.parametrize("seconds, expected", [
+    (0.0, "00:00:00,000"),
+    (-1.0, "00:00:00,000"),
+    (1.25, "00:00:01,250"),
+    (1.9996, "00:00:02,000"),
+    (59.9999, "00:01:00,000"),
+    (3599.9999, "01:00:00,000"),
+])
+def test_srt_time_carries_rounding(seconds, expected):
+    assert captions._srt_time(seconds) == expected
+
+
+@pytest.mark.parametrize("seconds, expected", [
+    (0.0, "0:00:00.00"),
+    (12.34, "0:00:12.34"),
+    (59.996, "0:01:00.00"),
+    (3599.999, "1:00:00.00"),
+])
+def test_ass_time_carries_rounding(seconds, expected):
+    assert captions._ass_time(seconds) == expected

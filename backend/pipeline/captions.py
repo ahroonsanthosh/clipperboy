@@ -27,19 +27,21 @@ COLOUR_OUTLINE = "&HC8000000"
 
 
 def _ass_time(seconds: float) -> str:
-    seconds = max(0.0, seconds)
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = seconds % 60
-    return f"{h:d}:{m:02d}:{s:05.2f}"
+    # Round to whole centiseconds first so 59.996 carries into the minute
+    # instead of printing an invalid "60.00".
+    cs = int(round(max(0.0, seconds) * 100))
+    h, cs = divmod(cs, 360000)
+    m, cs = divmod(cs, 6000)
+    s, cs = divmod(cs, 100)
+    return f"{h:d}:{m:02d}:{s:02d}.{cs:02d}"
 
 
 def _srt_time(seconds: float) -> str:
-    seconds = max(0.0, seconds)
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    ms = int(round((seconds - int(seconds)) * 1000))
+    # Same carry rule in milliseconds: 1.9996 is 00:00:02,000, not ",1000".
+    ms = int(round(max(0.0, seconds) * 1000))
+    h, ms = divmod(ms, 3600000)
+    m, ms = divmod(ms, 60000)
+    s, ms = divmod(ms, 1000)
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
